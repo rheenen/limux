@@ -6,6 +6,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::workspace_color::WorkspaceColor;
+
 pub const SESSION_VERSION: u32 = 1;
 pub const PERSISTENCE_DIR_NAME: &str = "limux";
 pub const SESSION_FILE_NAME: &str = "session.json";
@@ -63,6 +65,12 @@ pub struct WorkspaceState {
     pub folder_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart_command: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::workspace_color::deserialize_option"
+    )]
+    pub color: Option<WorkspaceColor>,
     pub layout: LayoutNodeState,
 }
 
@@ -454,6 +462,7 @@ impl AppSessionState {
                     cwd: workspace.cwd,
                     folder_path: workspace.folder_path,
                     autostart_command: None,
+                    color: None,
                     // Legacy files only knew "workspace exists"; rehydrate a fresh terminal at the
                     // last known directory instead of pretending process state can be restored.
                     layout: LayoutNodeState::Pane(PaneState {
@@ -1045,6 +1054,7 @@ mod tests {
                 cwd: Some("/canonical".to_string()),
                 folder_path: Some("/canonical".to_string()),
                 autostart_command: None,
+                color: None,
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/canonical"))),
             }],
             ..AppSessionState::default()
@@ -1153,6 +1163,7 @@ mod tests {
                 cwd: Some("/tmp".to_string()),
                 folder_path: Some("/tmp".to_string()),
                 autostart_command: Some("ssh user@server".to_string()),
+                color: None,
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/tmp"))),
             }],
             ..AppSessionState::default()
@@ -1186,6 +1197,39 @@ mod tests {
             decoded.workspaces[0].autostart_command.as_deref(),
             Some("ssh user@server")
         );
+    }
+
+    #[test]
+    fn workspace_color_round_trips_and_tolerates_missing_or_unknown_names() {
+        let mut workspace = WorkspaceState {
+            id: None,
+            name: "colored".to_string(),
+            favorite: false,
+            cwd: None,
+            folder_path: None,
+            autostart_command: None,
+            color: Some(WorkspaceColor::Teal),
+            layout: LayoutNodeState::Pane(PaneState::fallback(None)),
+        };
+
+        let mut encoded = serde_json::to_value(&workspace).expect("encode workspace");
+        assert_eq!(encoded["color"], "teal");
+        let decoded: WorkspaceState =
+            serde_json::from_value(encoded.clone()).expect("decode colored workspace");
+        assert_eq!(decoded, workspace);
+
+        // A colour this build does not know must not fail the whole session.
+        encoded["color"] = serde_json::json!("chartreuse");
+        let decoded: WorkspaceState =
+            serde_json::from_value(encoded.clone()).expect("decode unknown color");
+        assert_eq!(decoded.color, None);
+
+        workspace.color = None;
+        let encoded = serde_json::to_value(&workspace).expect("encode plain workspace");
+        assert!(encoded.get("color").is_none());
+        let decoded: WorkspaceState =
+            serde_json::from_value(encoded).expect("decode workspace without color");
+        assert_eq!(decoded.color, None);
     }
 
     #[test]
@@ -1735,6 +1779,7 @@ mod tests {
                 cwd: None,
                 folder_path: None,
                 autostart_command: None,
+                color: None,
                 layout: LayoutNodeState::Pane(PaneState {
                     pane_id: None,
                     active_tab_id: Some("keybinds-1".to_string()),
