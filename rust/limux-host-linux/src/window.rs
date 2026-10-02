@@ -1793,6 +1793,13 @@ pub fn build_window(app: &adw::Application) {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    let swatch_provider = gtk::CssProvider::new();
+    swatch_provider.load_from_data(workspace_color::SWATCH_BUTTON_CSS);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &swatch_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
+    );
 
     let style_manager = adw::StyleManager::default();
     apply_appearance(

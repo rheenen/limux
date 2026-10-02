@@ -154,11 +154,6 @@ const SHARED_CSS: &str = r#"
 }
 /* The colour sits on a label inside the button: a theme installed as user
    CSS (~/.config/gtk-4.0/gtk.css) out-ranks application CSS for buttons. */
-button.limux-ws-color-swatch-btn {
-    min-width: 0;
-    min-height: 0;
-    padding: 2px;
-}
 .limux-ws-color-swatch {
     min-width: 22px;
     min-height: 22px;
@@ -174,6 +169,18 @@ button.limux-ws-color-swatch-btn {
 }
 button:hover > .limux-ws-color-swatch.limux-ws-color-none {
     background: alpha(@window_fg_color, 0.1);
+}
+"#;
+
+/// Sizing of the swatch buttons. Loaded above user priority, because a theme
+/// installed as user CSS otherwise pads every button and spreads the swatches.
+pub const SWATCH_BUTTON_CSS: &str = r#"
+button.limux-ws-color-swatch-btn {
+    min-width: 0;
+    min-height: 0;
+    padding: 2px;
+    margin: 0;
+    border-radius: 999px;
 }
 "#;
 
@@ -273,6 +280,6 @@ mod tests {
         assert!(css.contains(&format!(
             "\n.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
         )));
-        assert!(css.contains(SWATCH_BUTTON_CSS_CLASS));
+        assert!(SWATCH_BUTTON_CSS.contains(&format!("button.{SWATCH_BUTTON_CSS_CLASS} {{")));
     }
 }
