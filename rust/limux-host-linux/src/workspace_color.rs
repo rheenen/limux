@@ -117,8 +117,8 @@ fn darken((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
 }
 
 /// How far an unselected row's colour is dimmed, at rest and under the pointer.
-const DIM_PERCENT: u16 = 60;
-const DIM_HOVER_PERCENT: u16 = 40;
+const DIM_PERCENT: u16 = 45;
+const DIM_HOVER_PERCENT: u16 = 28;
 
 /// Mix a colour toward white by `percent`, for the selected row's hover state.
 fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
