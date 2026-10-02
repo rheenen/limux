@@ -110,7 +110,17 @@ fn hex((r, g, b): (u8, u8, u8)) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-/// Mix a colour toward white by `percent`, for the hover state.
+/// Mix a colour toward black by `percent`, for rows that are not selected.
+fn darken((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
+    let mix = |channel: u8| (u16::from(channel) * (100 - percent) / 100) as u8;
+    (mix(r), mix(g), mix(b))
+}
+
+/// How far an unselected row's colour is dimmed, at rest and under the pointer.
+const DIM_PERCENT: u16 = 60;
+const DIM_HOVER_PERCENT: u16 = 40;
+
+/// Mix a colour toward white by `percent`, for the selected row's hover state.
 fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
     let mix = |channel: u8| {
         let channel = u16::from(channel);
@@ -191,12 +201,16 @@ pub fn workspace_color_css() -> String {
         let class = color.css_class();
         let base = hex(color.rgb());
         let hover = hex(lighten(color.rgb(), 12));
+        let dim = hex(darken(color.rgb(), DIM_PERCENT));
+        let dim_hover = hex(darken(color.rgb(), DIM_HOVER_PERCENT));
         // The extra class out-ranks the generic hover/selected row backgrounds.
+        // Only the selected row shows the full colour; the others are dimmed.
         css.push_str(&format!(
-            ".limux-sidebar-list row .limux-sidebar-row-box.{class},\n\
+            ".limux-sidebar-list row .limux-sidebar-row-box.{class} {{\n    background: {dim};\n}}\n\
+             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class} {{\n    background: {dim_hover};\n}}\n\
              .limux-sidebar-list row:selected .limux-sidebar-row-box.{class},\n\
              .{SWATCH_CSS_CLASS}.{class} {{\n    background: {base};\n}}\n\
-             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class},\n\
+             .limux-sidebar-list row:selected:hover .limux-sidebar-row-box.{class},\n\
              button:hover > .{SWATCH_CSS_CLASS}.{class} {{\n    background: {hover};\n}}\n"
         ));
     }
@@ -275,6 +289,10 @@ mod tests {
             // may depend on a button background.
             assert!(!css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
             assert!(css.contains(&hex(color.rgb())));
+            // Unselected rows are dimmed, so they stay darker than the selected one.
+            let dim = darken(color.rgb(), DIM_PERCENT);
+            assert!(css.contains(&hex(dim)));
+            assert!(relative_luminance(dim) < relative_luminance(color.rgb()));
         }
         assert!(css.contains(COLORED_ROW_CSS_CLASS));
         assert!(css.contains(&format!(

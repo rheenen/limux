@@ -1544,7 +1544,8 @@ const BASE_CSS: &str = r#"
     background: alpha(@window_fg_color, 0.05);
 }
 .limux-sidebar-list row:selected .limux-sidebar-row-box {
-    background: alpha(@accent_bg_color, 0.14);
+    background: alpha(@window_fg_color, 0.16);
+    box-shadow: inset 0 0 0 2px alpha(@window_fg_color, 0.9);
 }
 .limux-ws-name {
     color: alpha(@window_fg_color, 0.65);
@@ -4201,6 +4202,17 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
     popover.set_child(Some(&menu_box));
     popover.set_parent(row);
     popover.set_position(gtk::PositionType::Right);
+    // Until the menu has a size, GTK's pointer pick lands on its last button
+    // and leaves "Delete" looking hovered. Take pointer input only once laid out.
+    menu_box.set_can_target(false);
+    menu_box.add_tick_callback(|menu_box, _| {
+        if menu_box.width() > 0 {
+            menu_box.set_can_target(true);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
 
     for (color, button) in swatches {
         let state = state.clone();
