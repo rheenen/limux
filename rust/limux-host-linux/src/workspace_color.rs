@@ -7,7 +7,9 @@ use serde::Deserialize;
 
 /// CSS class on a sidebar row box that carries any palette colour.
 pub const COLORED_ROW_CSS_CLASS: &str = "limux-ws-colored";
-/// CSS class on the swatch buttons in the workspace context menu.
+/// CSS class on the buttons that hold a swatch in the workspace context menu.
+pub const SWATCH_BUTTON_CSS_CLASS: &str = "limux-ws-color-swatch-btn";
+/// CSS class on the swatch label inside each of those buttons.
 pub const SWATCH_CSS_CLASS: &str = "limux-ws-color-swatch";
 /// CSS class on the swatch that clears the colour.
 pub const NO_COLOR_SWATCH_CSS_CLASS: &str = "limux-ws-color-none";
@@ -150,7 +152,14 @@ const SHARED_CSS: &str = r#"
 .limux-sidebar-row-unread.limux-ws-colored {
     border-left-color: white;
 }
-button.limux-ws-color-swatch {
+/* The colour sits on a label inside the button: a theme installed as user
+   CSS (~/.config/gtk-4.0/gtk.css) out-ranks application CSS for buttons. */
+button.limux-ws-color-swatch-btn {
+    min-width: 0;
+    min-height: 0;
+    padding: 2px;
+}
+.limux-ws-color-swatch {
     min-width: 22px;
     min-height: 22px;
     padding: 0;
@@ -158,12 +167,12 @@ button.limux-ws-color-swatch {
     color: white;
     font-size: 11px;
 }
-button.limux-ws-color-swatch.limux-ws-color-none {
+.limux-ws-color-swatch.limux-ws-color-none {
     background: transparent;
     color: @window_fg_color;
     box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.45);
 }
-button.limux-ws-color-swatch.limux-ws-color-none:hover {
+button:hover > .limux-ws-color-swatch.limux-ws-color-none {
     background: alpha(@window_fg_color, 0.1);
 }
 "#;
@@ -179,9 +188,9 @@ pub fn workspace_color_css() -> String {
         css.push_str(&format!(
             ".limux-sidebar-list row .limux-sidebar-row-box.{class},\n\
              .limux-sidebar-list row:selected .limux-sidebar-row-box.{class},\n\
-             button.{SWATCH_CSS_CLASS}.{class} {{\n    background: {base};\n}}\n\
+             .{SWATCH_CSS_CLASS}.{class} {{\n    background: {base};\n}}\n\
              .limux-sidebar-list row:hover .limux-sidebar-row-box.{class},\n\
-             button.{SWATCH_CSS_CLASS}.{class}:hover {{\n    background: {hover};\n}}\n"
+             button:hover > .{SWATCH_CSS_CLASS}.{class} {{\n    background: {hover};\n}}\n"
         ));
     }
     css
@@ -254,12 +263,16 @@ mod tests {
         for color in WorkspaceColor::ALL {
             let class = color.css_class();
             assert!(css.contains(&format!(".limux-sidebar-row-box.{class}")));
-            assert!(css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
+            assert!(css.contains(&format!("\n.{SWATCH_CSS_CLASS}.{class} {{")));
+            // Themes loaded as user CSS restyle buttons, so no swatch colour
+            // may depend on a button background.
+            assert!(!css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
             assert!(css.contains(&hex(color.rgb())));
         }
         assert!(css.contains(COLORED_ROW_CSS_CLASS));
         assert!(css.contains(&format!(
-            "button.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS}"
+            "\n.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
         )));
+        assert!(css.contains(SWATCH_BUTTON_CSS_CLASS));
     }
 }

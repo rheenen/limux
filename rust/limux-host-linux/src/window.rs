@@ -4159,19 +4159,25 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
     let swatches: Vec<(Option<WorkspaceColor>, gtk::Button)> = std::iter::once(None)
         .chain(WorkspaceColor::ALL.into_iter().map(Some))
         .map(|color| {
-            let swatch = gtk::Button::with_label(if current_color == color {
+            // The colour is painted on the label, not the button: see the
+            // swatch rules in `workspace_color`.
+            let dot = gtk::Label::new(Some(if current_color == color {
                 "\u{2713}"
             } else {
                 ""
-            });
-            swatch.add_css_class(workspace_color::SWATCH_CSS_CLASS);
+            }));
+            dot.add_css_class(workspace_color::SWATCH_CSS_CLASS);
+            let swatch = gtk::Button::new();
+            swatch.set_child(Some(&dot));
+            swatch.add_css_class("flat");
+            swatch.add_css_class(workspace_color::SWATCH_BUTTON_CSS_CLASS);
             match color {
                 Some(color) => {
-                    swatch.add_css_class(&color.css_class());
+                    dot.add_css_class(&color.css_class());
                     swatch.set_tooltip_text(Some(color.label()));
                 }
                 None => {
-                    swatch.add_css_class(workspace_color::NO_COLOR_SWATCH_CSS_CLASS);
+                    dot.add_css_class(workspace_color::NO_COLOR_SWATCH_CSS_CLASS);
                     swatch.set_tooltip_text(Some("No color"));
                 }
             }
