@@ -1381,7 +1381,7 @@ pub struct TerminalCallbacks {
 }
 
 impl TerminalCallbacks {
-    fn disconnected() -> Self {
+    pub(crate) fn disconnected() -> Self {
         Self {
             on_output_activity: Rc::new(|_| {}),
             on_title_changed: Box::new(|_| {}),
