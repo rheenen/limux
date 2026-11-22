@@ -12,6 +12,11 @@ use super::view::ZoomStatus;
 pub const ACTION: &str = "win.zoom-level";
 pub const ACTION_NAME: &str = "zoom-level";
 
+/// The window actions of the two filter buttons (no parameter).
+pub const HIDE_DONE_ACTION: &str = "zoom-hide-done";
+pub const HIDE_SHELLS_ACTION: &str = "zoom-hide-shells";
+const FILTER_ON_CSS: &str = "limux-zoom-filter-on";
+
 pub const LEVELS: [ZoomLevel; 4] = [ZoomLevel::Z0, ZoomLevel::Z1, ZoomLevel::Z2, ZoomLevel::Z3];
 const ACTIVE_CSS: &str = "limux-zoom-level-active";
 
@@ -70,18 +75,53 @@ pub fn level_enabled(level: ZoomLevel, status: ZoomStatus) -> bool {
     }
 }
 
+pub fn hide_done_hint(on: bool) -> &'static str {
+    if on {
+        "Finished subagents and shells are hidden. Click to show them."
+    } else {
+        "Hide finished subagents and shells"
+    }
+}
+
+pub fn hide_shells_hint(on: bool) -> &'static str {
+    if on {
+        "Background shells are hidden; only subagents show. Click to show them."
+    } else {
+        "Hide background shells; show only subagents"
+    }
+}
+
 pub struct ZoomBar {
     pub root: gtk::Box,
     buttons: Vec<(ZoomLevel, gtk::Button)>,
+    hide_done: gtk::Button,
+    hide_shells: gtk::Button,
+}
+
+fn filter_button(label: &str, icon: &str, action: &str) -> gtk::Button {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.append(&gtk::Image::from_icon_name(icon));
+    content.append(&gtk::Label::new(Some(label)));
+    let button = gtk::Button::new();
+    button.set_child(Some(&content));
+    button.add_css_class("flat");
+    button.add_css_class("limux-top-bar-btn");
+    button.add_css_class("limux-zoom-filter");
+    button.set_focus_on_click(false);
+    button.set_valign(gtk::Align::Center);
+    button.set_action_name(Some(&format!("win.{action}")));
+    button
 }
 
 impl ZoomBar {
     /// Each button starts `ACTION` with the index of its level.
     pub fn new() -> Self {
         install_css();
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        root.add_css_class("linked");
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         root.add_css_class("limux-zoom-bar");
+        let levels = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        levels.add_css_class("linked");
+        root.append(&levels);
         root.set_valign(gtk::Align::Center);
         root.set_margin_start(6);
         root.set_margin_end(6);
@@ -95,11 +135,28 @@ impl ZoomBar {
                 button.set_focus_on_click(false);
                 button.set_action_name(Some(ACTION));
                 button.set_action_target_value(Some(&(index as u32).to_variant()));
-                root.append(&button);
+                levels.append(&button);
                 (level, button)
             })
             .collect();
-        Self { root, buttons }
+        let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        separator.set_margin_top(8);
+        separator.set_margin_bottom(8);
+        root.append(&separator);
+        let hide_done = filter_button("Hide done", "object-select-symbolic", HIDE_DONE_ACTION);
+        let hide_shells = filter_button(
+            "Hide shells",
+            "utilities-terminal-symbolic",
+            HIDE_SHELLS_ACTION,
+        );
+        root.append(&hide_done);
+        root.append(&hide_shells);
+        Self {
+            root,
+            buttons,
+            hide_done,
+            hide_shells,
+        }
     }
 
     pub fn sync(&self, status: ZoomStatus, zoom_out: Option<&str>, zoom_in: Option<&str>) {
@@ -112,6 +169,30 @@ impl ZoomBar {
             button.set_sensitive(*level == status.level || level_enabled(*level, status));
             let hint = level_hint(*level, status.can_zoom, zoom_out, zoom_in);
             button.set_tooltip_text(Some(&hint));
+        }
+        for (button, on, hint) in [
+            (
+                &self.hide_done,
+                status.filter.hide_done,
+                hide_done_hint(status.filter.hide_done),
+            ),
+            (
+                &self.hide_shells,
+                status.filter.hide_shells,
+                hide_shells_hint(status.filter.hide_shells),
+            ),
+        ] {
+            if on {
+                button.add_css_class(FILTER_ON_CSS);
+            } else {
+                button.remove_css_class(FILTER_ON_CSS);
+            }
+            button.set_tooltip_text(Some(hint));
+            button.update_state(&[gtk::accessible::State::Pressed(if on {
+                gtk::AccessibleTristate::True
+            } else {
+                gtk::AccessibleTristate::False
+            })]);
         }
     }
 }
@@ -129,7 +210,9 @@ fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         ".limux-zoom-level { min-width: 28px; padding: 0 6px; font-size: 0.85em; }\n\
-         .limux-zoom-level-active { background: alpha(#f0b45e, 0.35); font-weight: bold; }\n",
+         .limux-zoom-level-active { background: alpha(#f0b45e, 0.35); font-weight: bold; }\n\
+         .limux-zoom-filter { padding: 0 8px; font-size: 0.85em; }\n\
+         .limux-zoom-filter-on { background: alpha(#6aa6ff, 0.3); }\n",
     );
     gtk::style_context_add_provider_for_display(
         &display,
@@ -143,7 +226,19 @@ mod tests {
     use super::*;
 
     fn status(level: ZoomLevel, can_zoom: bool) -> ZoomStatus {
-        ZoomStatus { level, can_zoom }
+        ZoomStatus {
+            level,
+            can_zoom,
+            filter: Default::default(),
+        }
+    }
+
+    #[test]
+    fn filter_hints_say_what_a_click_does() {
+        assert!(hide_done_hint(false).starts_with("Hide finished"));
+        assert!(hide_done_hint(true).contains("Click to show"));
+        assert!(hide_shells_hint(false).contains("only subagents"));
+        assert!(hide_shells_hint(true).contains("Click to show"));
     }
 
     #[test]

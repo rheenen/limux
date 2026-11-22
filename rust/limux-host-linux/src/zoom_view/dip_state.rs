@@ -109,6 +109,46 @@ pub struct Run {
     pub chat: Option<Vec<String>>,
 }
 
+impl Run {
+    /// A background shell (kind "shell"), not a subagent.
+    pub fn is_shell(&self) -> bool {
+        self.kind.as_deref() == Some(SHELL_KIND)
+    }
+
+    /// The time the run took, or has taken so far: "4s", "6m", "1h 12m".
+    pub fn elapsed_label(&self, now_ms: u64) -> Option<String> {
+        let start = self.started_ms?;
+        let end = self.ended_ms.unwrap_or(now_ms);
+        Some(format_elapsed(end.saturating_sub(start)))
+    }
+}
+
+pub const SHELL_KIND: &str = "shell";
+
+pub fn format_elapsed(ms: u64) -> String {
+    let secs = ms / 1000;
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// The top-bar filters of the zoom view (per workspace).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunFilter {
+    /// Hide finished subagents and shells.
+    pub hide_done: bool,
+    /// Hide background shells; only subagents stay.
+    pub hide_shells: bool,
+}
+
+impl RunFilter {
+    pub fn keeps(self, run: &Run) -> bool {
+        !(self.hide_done && !run.status.is_running()) && !(self.hide_shells && run.is_shell())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct PlanNode {
     pub id: String,
@@ -191,6 +231,13 @@ impl DipState {
     /// no subagents hides the rail).
     pub fn has_content(&self) -> bool {
         self.plan.as_ref().is_some_and(|p| !p.nodes.is_empty()) || !self.runs.is_empty()
+    }
+
+    /// A copy without the runs that `filter` hides (the rail shows it).
+    pub fn filtered(&self, filter: RunFilter) -> Self {
+        let mut copy = self.clone();
+        copy.runs.retain(|run| filter.keeps(run));
+        copy
     }
 
     /// The runs that get a tile: running first, then the finished ones
@@ -317,6 +364,46 @@ mod tests {
         assert_eq!(state.runs[1].chat.as_ref().unwrap()[4], "7");
         assert_eq!(state.runs[2].status, RunStatus::TakenOver);
         assert_eq!(state.runs[3].status, RunStatus::Unknown);
+    }
+
+    #[test]
+    fn filters_hide_done_runs_and_shells() {
+        let mut state = parse(SAMPLE).unwrap();
+        state.runs[1].kind = Some(SHELL_KIND.to_string());
+        let ids = |s: &DipState| s.runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&state.filtered(RunFilter::default())),
+            ["a", "b", "c", "d"]
+        );
+        let done = RunFilter {
+            hide_done: true,
+            hide_shells: false,
+        };
+        assert_eq!(ids(&state.filtered(done)), ["b"]);
+        let shells = RunFilter {
+            hide_done: false,
+            hide_shells: true,
+        };
+        assert_eq!(ids(&state.filtered(shells)), ["a", "c", "d"]);
+        let both = RunFilter {
+            hide_done: true,
+            hide_shells: true,
+        };
+        assert!(state.filtered(both).runs.is_empty());
+    }
+
+    #[test]
+    fn elapsed_labels_use_the_largest_sensible_unit() {
+        assert_eq!(format_elapsed(4_200), "4s");
+        assert_eq!(format_elapsed(6 * 60_000 + 59_000), "6m");
+        assert_eq!(format_elapsed(72 * 60_000), "1h 12m");
+        let mut state = parse(SAMPLE).unwrap();
+        let run = &mut state.runs[0];
+        assert_eq!(run.elapsed_label(5_000), None);
+        run.started_ms = Some(1_000);
+        assert_eq!(run.elapsed_label(31_000).as_deref(), Some("30s"));
+        run.ended_ms = Some(11_000);
+        assert_eq!(run.elapsed_label(999_000).as_deref(), Some("10s"));
     }
 
     #[test]

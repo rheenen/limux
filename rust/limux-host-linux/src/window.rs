@@ -2699,6 +2699,26 @@ fn install_zoom_controls(window: &adw::ApplicationWindow, state: &State) {
         });
     }
     window.add_action(&zoom_level);
+    for (name, hide_shells) in [
+        (crate::zoom_view::bar::HIDE_DONE_ACTION, false),
+        (crate::zoom_view::bar::HIDE_SHELLS_ACTION, true),
+    ] {
+        let action = gtk::gio::SimpleAction::new(name, None);
+        let state = state.clone();
+        action.connect_activate(move |_, _| {
+            let zoom = state.borrow().active_workspace().map(|ws| ws.zoom.clone());
+            if let Some(zoom) = zoom {
+                let mut filter = zoom.status().filter;
+                if hide_shells {
+                    filter.hide_shells = !filter.hide_shells;
+                } else {
+                    filter.hide_done = !filter.hide_done;
+                }
+                zoom.set_filter(filter);
+            }
+        });
+        window.add_action(&action);
+    }
     sync_zoom_bar(state);
 
     // A scroll event carries no position on every backend, so the pointer
@@ -2751,6 +2771,7 @@ pub(crate) fn sync_zoom_bar(state: &State) {
             crate::zoom_view::view::ZoomStatus {
                 level: crate::zoom_view::geometry::ZoomLevel::Z0,
                 can_zoom: false,
+                filter: Default::default(),
             },
         );
         (

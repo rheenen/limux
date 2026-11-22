@@ -14,7 +14,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use super::config::{RailState, ZoomLayout, ZoomViewConfig};
-use super::dip_state::{self, DipState, Run};
+use super::dip_state::{self, DipState, Run, RunFilter, RunStatus};
 use super::geometry::{self, Frame, ZoomLevel};
 use super::rail::PlanRail;
 use crate::app_config::AppConfig;
@@ -31,9 +31,88 @@ const FALLBACK_CELL: (f64, f64) = (8.0, 17.0);
 struct Tile {
     run_id: String,
     frame: gtk::Box,
-    title: gtk::Label,
+    title: CardTitle,
     term: TerminalWidget,
     follow: Vec<String>,
+}
+
+/// The title bar of a terminal card: status icon, name, model, then the
+/// elapsed time (or the size) at the right. It has no buttons.
+struct CardTitle {
+    root: gtk::Box,
+    glyph: gtk::Label,
+    name: gtk::Label,
+    detail: gtk::Label,
+    end: gtk::Label,
+}
+
+const STATUS_CSS: [&str; 7] = [
+    "limux-zoom-st-running",
+    "limux-zoom-st-done",
+    "limux-zoom-st-failed",
+    "limux-zoom-st-limit",
+    "limux-zoom-st-stopped",
+    "limux-zoom-st-taken-over",
+    "limux-zoom-st-unknown",
+];
+
+fn status_css(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => STATUS_CSS[0],
+        RunStatus::Done => STATUS_CSS[1],
+        RunStatus::Failed => STATUS_CSS[2],
+        RunStatus::Limit => STATUS_CSS[3],
+        RunStatus::Stopped => STATUS_CSS[4],
+        RunStatus::TakenOver => STATUS_CSS[5],
+        RunStatus::Unknown => STATUS_CSS[6],
+    }
+}
+
+impl CardTitle {
+    fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        root.add_css_class("limux-zoom-card-title");
+        root.set_size_request(-1, TILE_TITLE_HEIGHT);
+        let label = |css: &str| {
+            let label = gtk::Label::new(None);
+            label.add_css_class(css);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label
+        };
+        let glyph = label("limux-zoom-card-glyph");
+        glyph.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        let name = label("limux-zoom-card-name");
+        let detail = label("limux-zoom-card-detail");
+        detail.add_css_class("dim-label");
+        let end = label("limux-zoom-card-end");
+        end.add_css_class("dim-label");
+        end.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        end.set_hexpand(true);
+        end.set_xalign(1.0);
+        root.append(&glyph);
+        root.append(&name);
+        root.append(&detail);
+        root.append(&end);
+        Self {
+            root,
+            glyph,
+            name,
+            detail,
+            end,
+        }
+    }
+
+    fn set(&self, status: RunStatus, name: &str, detail: Option<&str>, end: Option<&str>) {
+        self.glyph.set_label(status.glyph());
+        for css in STATUS_CSS {
+            self.glyph.remove_css_class(css);
+        }
+        self.glyph.add_css_class(status_css(status));
+        self.name.set_label(name);
+        self.detail.set_label(detail.unwrap_or_default());
+        self.detail.set_visible(detail.is_some());
+        self.end.set_label(end.unwrap_or_default());
+    }
 }
 
 /// The session whose subagents the view shows: a terminal surface and
@@ -55,6 +134,8 @@ pub struct ZoomView {
     config: Rc<RefCell<AppConfig>>,
     frame: gtk::Grid,
     main_slot: gtk::Box,
+    main_title: CardTitle,
+    show_plan: gtk::Button,
     rail_holder: gtk::Box,
     tiles_box: gtk::Box,
     tiles_header: gtk::Label,
@@ -78,6 +159,7 @@ pub struct ZoomView {
     /// Called when `status()` changes (the top bar follows it).
     on_change: RefCell<Option<Rc<dyn Fn()>>>,
     last_status: Cell<Option<ZoomStatus>>,
+    filter: Cell<RunFilter>,
 }
 
 /// What the top-bar zoom buttons show for a workspace.
@@ -86,6 +168,7 @@ pub struct ZoomStatus {
     pub level: ZoomLevel,
     /// True when a zoom-out has something to show (or the view is zoomed).
     pub can_zoom: bool,
+    pub filter: RunFilter,
 }
 
 fn now_ms() -> u64 {
@@ -141,10 +224,20 @@ fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         ".limux-plan-rail { border-left: 1px solid alpha(currentColor, 0.12); }\n\
-         .limux-zoom-tile { border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; }\n\
+         .limux-zoom-tile, .limux-zoom-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
+         .limux-zoom-card { border-color: alpha(#6aa6ff, 0.55); margin: 4px 0 4px 4px; }\n\
          .limux-zoom-tile-done { opacity: 0.6; }\n\
          .limux-zoom-tile-selected { border: 2px solid #f0b45e; }\n\
-         .limux-zoom-tile-title { padding: 2px 8px; font-size: 0.9em; }\n\
+         .limux-zoom-card-title { padding: 0 10px; font-size: 0.9em; background: alpha(currentColor, 0.05); border-bottom: 1px solid alpha(currentColor, 0.1); }\n\
+         .limux-zoom-card-glyph { font-weight: bold; }\n\
+         .limux-zoom-card-name { font-weight: 600; }\n\
+         .limux-zoom-card-end { font-family: monospace; }\n\
+         .limux-zoom-card-plan { padding: 0 8px; min-height: 20px; font-size: 0.9em; }\n\
+         .limux-zoom-st-running { color: #6aa6ff; }\n\
+         .limux-zoom-st-done { color: #6fcf8f; }\n\
+         .limux-zoom-st-failed { color: #ff8a8a; }\n\
+         .limux-zoom-st-limit { color: #f0b45e; }\n\
+         .limux-zoom-st-taken-over { color: #c39bff; }\n\
          .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n",
     );
     gtk::style_context_add_provider_for_display(
@@ -165,8 +258,21 @@ impl ZoomView {
         frame.set_vexpand(true);
         frame.set_column_spacing(0);
         frame.set_row_spacing(0);
+        // The main terminal card: its title bar, then the pane (the split
+        // tree appends it while zoomed).
         let main_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
         main_slot.set_vexpand(true);
+        main_slot.add_css_class("limux-zoom-card");
+        main_slot.set_overflow(gtk::Overflow::Hidden);
+        let main_title = CardTitle::new();
+        let show_plan = gtk::Button::with_label("Show plan");
+        show_plan.add_css_class("limux-zoom-card-plan");
+        show_plan.set_action_name(Some("win.zoom-show-plan"));
+        show_plan.set_focus_on_click(false);
+        show_plan.set_valign(gtk::Align::Center);
+        show_plan.set_visible(false);
+        main_title.root.append(&show_plan);
+        main_slot.append(&main_title.root);
         let rail_holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
         rail_holder.set_vexpand(true);
         rail_holder.set_hexpand(false);
@@ -211,6 +317,8 @@ impl ZoomView {
             config,
             frame,
             main_slot,
+            main_title,
+            show_plan,
             rail_holder,
             tiles_box,
             tiles_header,
@@ -231,6 +339,7 @@ impl ZoomView {
             timer: RefCell::new(None),
             on_change: RefCell::new(None),
             last_status: Cell::new(None),
+            filter: Cell::new(RunFilter::default()),
         });
 
         container.rail_slot().append(&view.rail.root);
@@ -309,7 +418,20 @@ impl ZoomView {
         ZoomStatus {
             level,
             can_zoom: level.is_zoomed() || !self.tile_runs().is_empty(),
+            filter: self.filter.get(),
         }
+    }
+
+    /// The top-bar filters changed: tiles and rail follow them.
+    pub fn set_filter(self: &Rc<Self>, filter: RunFilter) {
+        if self.filter.replace(filter) == filter {
+            return;
+        }
+        self.state_changed();
+        if !self.level.get().is_zoomed() {
+            self.sync_tiles();
+        }
+        self.notify_status();
     }
 
     /// `callback` runs when `status()` changes. It runs from inside the
@@ -455,7 +577,8 @@ impl ZoomView {
     }
 
     fn state_changed(self: &Rc<Self>) {
-        let state = self.current_state();
+        let filter = self.filter.get();
+        let state = self.current_state().map(|state| state.filtered(filter));
         self.rail.update(state.as_ref());
         self.sync_show_buttons();
         if self.level.get().is_zoomed() {
@@ -477,6 +600,7 @@ impl ZoomView {
             if size != self.last_size.get() {
                 self.relayout();
             }
+            self.sync_titles();
         }
         self.notify_status();
     }
@@ -516,6 +640,8 @@ impl ZoomView {
                 button.set_visible(session_pane.as_ref() == Some(&pane));
             }
         }
+        // While zoomed the pane header hides; the card title has the button.
+        self.show_plan.set_visible(session_pane.is_some());
     }
 
     // -- Tiles ----------------------------------------------------------
@@ -524,9 +650,11 @@ impl ZoomView {
         let show_finished = self.zoom_config().show_finished;
         self.current_state()
             .map(|state| {
+                let filter = self.filter.get();
                 state
                     .tile_runs(show_finished)
                     .into_iter()
+                    .filter(|run| filter.keeps(run))
                     .cloned()
                     .collect()
             })
@@ -555,12 +683,8 @@ impl ZoomView {
         frame.add_css_class("limux-zoom-tile");
         frame.set_widget_name(&format!("{TILE_NAME_PREFIX}{}", run.id));
         frame.set_overflow(gtk::Overflow::Hidden);
-        let title = gtk::Label::new(None);
-        title.set_xalign(0.0);
-        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        title.add_css_class("limux-zoom-tile-title");
-        title.set_size_request(-1, TILE_TITLE_HEIGHT);
-        frame.append(&title);
+        let title = CardTitle::new();
+        frame.append(&title.root);
         frame.append(&term.root);
 
         let click = gtk::GestureClick::new();
@@ -611,13 +735,12 @@ impl ZoomView {
                     None => continue,
                 },
             };
-            let model = run
-                .model
-                .as_deref()
-                .map(|m| format!(" · {m}"))
-                .unwrap_or_default();
-            tile.title
-                .set_label(&format!("{} {}{model}", run.status.glyph(), run.name));
+            tile.title.set(
+                run.status,
+                &run.name,
+                run.model.as_deref(),
+                run.elapsed_label(now_ms()).as_deref(),
+            );
             if run.status.is_running() {
                 tile.frame.remove_css_class("limux-zoom-tile-done");
             } else {
@@ -628,6 +751,40 @@ impl ZoomView {
         *tiles = ordered;
         drop(tiles);
         self.sync_selection();
+        self.sync_titles();
+    }
+
+    /// The elapsed times of the tiles and the main card's title. The poll
+    /// calls it, so the times move on.
+    fn sync_titles(&self) {
+        let state = self.current_state();
+        let now = now_ms();
+        for tile in self.tiles.borrow().iter() {
+            if let Some(run) = state.as_ref().and_then(|s| s.run(&tile.run_id)) {
+                tile.title
+                    .end
+                    .set_label(&run.elapsed_label(now).unwrap_or_default());
+            }
+        }
+        let Some(session) = self.session.borrow().clone() else {
+            return;
+        };
+        let summary = pane::active_surface_summary(&session.pane);
+        let name = summary
+            .as_ref()
+            .map(|s| s.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Terminal".to_string());
+        let plan = state
+            .as_ref()
+            .and_then(|s| s.plan.as_ref())
+            .map(|p| p.title.clone());
+        let size = pane::terminal_handle_for_surface(&session.pane, None)
+            .map(|(_, handle)| handle.health())
+            .filter(|h| h.columns > 0)
+            .map(|h| format!("{} × {}", h.columns, h.rows));
+        self.main_title
+            .set(RunStatus::Running, &name, plan.as_deref(), size.as_deref());
     }
 
     pub fn select(&self, run_id: Option<String>) {
@@ -698,6 +855,8 @@ impl ZoomView {
             return false;
         }
         self.level.set(ZoomLevel::Z1);
+        // The card title replaces the pane header while zoomed.
+        pane::set_pane_header_visible(pane, false);
         self.sync_tiles();
         self.relayout();
         self.notify_status();
@@ -764,6 +923,13 @@ impl ZoomView {
         self.notify_status();
     }
 
+    /// Every pane header back (the zoomed pane may have moved meanwhile).
+    fn show_pane_headers(container: &SplitTreeContainer) {
+        for pane in container.panes() {
+            pane::set_pane_header_visible(&pane, true);
+        }
+    }
+
     fn return_rail(&self, container: &SplitTreeContainer) {
         if let Some(parent) = self.rail.root.parent().and_downcast::<gtk::Box>() {
             parent.remove(&self.rail.root);
@@ -779,6 +945,7 @@ impl ZoomView {
         self.sync_selection();
         if let Some(container) = self.container.upgrade() {
             self.return_rail(&container);
+            Self::show_pane_headers(&container);
             container.leave_zoom_frame();
         }
         self.notify_status();
@@ -792,6 +959,7 @@ impl ZoomView {
         self.sync_selection();
         if let Some(container) = self.container.upgrade() {
             self.return_rail(&container);
+            Self::show_pane_headers(&container);
         }
         self.notify_status();
     }

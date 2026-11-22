@@ -24,6 +24,8 @@ fewer rows. A limux-native plan rail shows the plan tree next to them.
 | No plan and no runs | The rail hides itself. |
 | Rail v1 | Tree, "Hide done", plan picker. A click on a run selects its tile. |
 | Top bar | Buttons Z0–Z3 go straight to a level. Z0 returns without a promotion. A deeper level zooms out of the focused pane. The tooltip names the shortcuts and Ctrl+wheel. |
+| Top bar filters | "Hide done" hides finished subagents and shells; "Hide shells" hides background shells, so only subagents show. The filter is per workspace and applies to the tiles and the rail. A hidden tile stops its terminal; it starts again when the filter turns off. |
+| Cards | The main terminal and each tile are rounded cards with a title: status glyph, name, detail (model, or tab · plan · cols × rows) and the elapsed time. Tiles have no other controls. The pane header hides while zoomed and comes back at Z0. |
 | Shortcuts | Ctrl+Alt+Z zooms out of the focused pane, Ctrl+Alt+Shift+Z zooms in (like Ctrl+wheel). Keys `zoom_view_out` and `zoom_view_in` in `shortcuts.json`. Ctrl+Alt+Shift+Up/Down are GNOME's move-to-workspace keys, so the shortcuts do not use them. |
 
 ## Settings (`settings.json`)
