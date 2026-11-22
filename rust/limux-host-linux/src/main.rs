@@ -26,6 +26,7 @@ mod window;
 mod workspace_color;
 mod workspace_group;
 mod x11_cursor_errors;
+mod zoom_view;
 
 use adw::prelude::*;
 use libadwaita as adw;

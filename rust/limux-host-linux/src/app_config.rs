@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::gui_hooks::GuiHooksConfig;
 use crate::shortcut_config;
 use crate::terminal_font::TerminalFontConfig;
+use crate::zoom_view::config::ZoomViewConfig;
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const DEFAULT_UI_SCALE: f32 = 1.0;
@@ -90,6 +91,8 @@ pub struct AppConfig {
     pub terminal_font: TerminalFontConfig,
     #[serde(skip)]
     pub hooks: GuiHooksConfig,
+    #[serde(skip)]
+    pub zoom_view: ZoomViewConfig,
 }
 
 impl AppConfig {
@@ -615,6 +618,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         font_size,
         terminal_font: TerminalFontConfig::from_json(root.get("terminal_font")),
         hooks: GuiHooksConfig::from_value(root.get("hooks")),
+        zoom_view: ZoomViewConfig::from_value(root.get("zoom_view")),
     }
 }
 
@@ -710,6 +714,7 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
     } else {
         root.remove("terminal_font");
     }
+    root.insert("zoom_view".to_string(), config.zoom_view.to_value());
 
     if let Some(hooks) = config.hooks.to_value() {
         root.insert("hooks".to_string(), hooks);

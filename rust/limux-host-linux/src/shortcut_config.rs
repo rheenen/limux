@@ -31,6 +31,8 @@ pub enum ShortcutId {
     CloseFocusedPane,
     CloseFocusedTab,
     ToggleFocusedPaneZoom,
+    ZoomViewOut,
+    ZoomViewIn,
     NewTerminal,
     FocusLeft,
     FocusRight,
@@ -84,6 +86,8 @@ pub enum ShortcutCommand {
     CloseFocusedPane,
     CloseFocusedTab,
     ToggleFocusedPaneZoom,
+    ZoomViewOut,
+    ZoomViewIn,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -313,7 +317,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 49] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 51] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -498,6 +502,28 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 49] = [
         label: "Toggle Focused Pane Zoom",
         registers_gtk_accel: false,
         command: ShortcutCommand::ToggleFocusedPaneZoom,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::ZoomViewOut,
+        config_key: "zoom_view_out",
+        action_name: "win.zoom-view-out",
+        default_accel: "<Ctrl><Alt>z",
+        label: "Zoom Out to Subagents",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::ZoomViewOut,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::ZoomViewIn,
+        config_key: "zoom_view_in",
+        action_name: "win.zoom-view-in",
+        default_accel: "<Ctrl><Alt><Shift>z",
+        label: "Zoom In from Subagents",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::ZoomViewIn,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
@@ -1715,7 +1741,28 @@ mod tests {
 
     #[test]
     fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 49);
+        assert_eq!(definitions().len(), 51);
+    }
+
+    #[test]
+    fn zoom_view_shortcuts_have_their_defaults_and_commands() {
+        let resolved = resolve_shortcuts_from_str("{}").expect("defaults");
+        for (id, label, command) in [
+            (
+                ShortcutId::ZoomViewOut,
+                "Ctrl+Alt+Z",
+                ShortcutCommand::ZoomViewOut,
+            ),
+            (
+                ShortcutId::ZoomViewIn,
+                "Ctrl+Alt+Shift+Z",
+                ShortcutCommand::ZoomViewIn,
+            ),
+        ] {
+            let shortcut = resolved.find_by_id(id).expect("zoom shortcut");
+            assert_eq!(shortcut.display_label().as_deref(), Some(label));
+            assert_eq!(shortcut.definition.command, command);
+        }
     }
 
     #[test]

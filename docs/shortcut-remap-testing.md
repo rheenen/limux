@@ -120,6 +120,8 @@ These are the current supported config keys and defaults:
 | `close_focused_pane` | `<Ctrl><Alt>w` |
 | `close_focused_tab` | `<Ctrl><Shift>w` |
 | `toggle_focused_pane_zoom` | `<Ctrl><Shift>z` |
+| `zoom_view_out` | `<Ctrl><Alt>z` |
+| `zoom_view_in` | `<Ctrl><Alt><Shift>z` |
 | `new_terminal` | `<Ctrl><Alt>t` |
 | `focus_left` | `<Ctrl><Alt>Left` |
 | `focus_right` | `<Ctrl><Alt>Right` |

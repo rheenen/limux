@@ -265,7 +265,27 @@ pub(crate) struct SplitTreeContainer {
     /// usually inside the closing pane.
     last_focused: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     zoomed_pane: RefCell<Option<gtk::Widget>>,
+    /// The zoom view around the zoomed pane: (frame root, main slot). Only
+    /// set while `zoomed_pane` is set.
+    zoom_frame: RefCell<Option<(gtk::Widget, gtk::Box)>>,
+    /// Called when a split, a close or the pane-zoom toggle drops the zoom
+    /// view frame.
+    on_frame_dropped: RefCell<Option<Box<dyn Fn()>>>,
+    /// `bin` plus the slot for the plan rail at its right.
+    outer: gtk::Box,
+    rail_slot: gtk::Box,
     state: State,
+}
+
+fn build_outer(bin: &gtk::Box) -> (gtk::Box, gtk::Box) {
+    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    outer.set_hexpand(true);
+    outer.set_vexpand(true);
+    let rail_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    rail_slot.set_vexpand(true);
+    outer.append(bin);
+    outer.append(&rail_slot);
+    (outer, rail_slot)
 }
 
 impl SplitTreeContainer {
@@ -275,6 +295,8 @@ impl SplitTreeContainer {
         bin.set_hexpand(true);
         bin.set_vexpand(true);
         bin.append(&initial_pane);
+
+        let (outer, rail_slot) = build_outer(&bin);
 
         Rc::new(Self {
             tree: RefCell::new(SplitNode::Leaf {
@@ -286,6 +308,10 @@ impl SplitTreeContainer {
             after_rebuild: RefCell::default(),
             last_focused: RefCell::new(None),
             zoomed_pane: RefCell::new(None),
+            zoom_frame: RefCell::new(None),
+            on_frame_dropped: RefCell::new(None),
+            outer,
+            rail_slot,
             state: state.clone(),
         })
     }
@@ -300,6 +326,8 @@ impl SplitTreeContainer {
         let widget = build_widget_tree(&node, state);
         bin.append(&widget);
 
+        let (outer, rail_slot) = build_outer(&bin);
+
         Rc::new(Self {
             tree: RefCell::new(node),
             bin,
@@ -308,13 +336,63 @@ impl SplitTreeContainer {
             after_rebuild: RefCell::default(),
             last_focused: RefCell::new(None),
             zoomed_pane: RefCell::new(None),
+            zoom_frame: RefCell::new(None),
+            on_frame_dropped: RefCell::new(None),
+            outer,
+            rail_slot,
             state: state.clone(),
         })
     }
 
     /// The container widget to add to the gtk::Stack.
     pub(crate) fn widget(&self) -> &gtk::Box {
-        &self.bin
+        &self.outer
+    }
+
+    /// The slot at the right of the workspace where the plan rail sits at
+    /// zoom level Z0.
+    pub(crate) fn rail_slot(&self) -> &gtk::Box {
+        &self.rail_slot
+    }
+
+    pub(crate) fn set_on_frame_dropped(&self, f: impl Fn() + 'static) {
+        *self.on_frame_dropped.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Show `target` inside `frame` (in `slot`) instead of the split tree.
+    /// The other panes stay alive in the model, as with the pane zoom.
+    pub(crate) fn enter_zoom_frame(
+        self: &Rc<Self>,
+        target: &gtk::Widget,
+        frame: gtk::Widget,
+        slot: gtk::Box,
+    ) -> bool {
+        if !self.contains(target) {
+            return false;
+        }
+        self.save_focus();
+        *self.zoomed_pane.borrow_mut() = Some(target.clone());
+        *self.zoom_frame.borrow_mut() = Some((frame, slot));
+        *self.last_focused.borrow_mut() = Some(target.downgrade());
+        self.trigger_rebuild();
+        true
+    }
+
+    /// Put the split tree back (zoom level Z0).
+    pub(crate) fn leave_zoom_frame(self: &Rc<Self>) {
+        if self.zoom_frame.borrow_mut().take().is_some() {
+            self.restore_zoom();
+        }
+    }
+
+    /// Drop the frame because another action changed the layout; tell the
+    /// zoom view so its level returns to Z0.
+    fn drop_zoom_frame(&self) {
+        if self.zoom_frame.borrow_mut().take().is_some() {
+            if let Some(f) = self.on_frame_dropped.borrow().as_ref() {
+                f();
+            }
+        }
     }
 
     /// Borrow the tree for reading (e.g. session snapshot).
@@ -361,6 +439,7 @@ impl SplitTreeContainer {
     }
 
     pub(crate) fn toggle_zoom(self: &Rc<Self>, target: &gtk::Widget) -> bool {
+        self.drop_zoom_frame();
         if self.zoomed_pane.borrow().is_some() {
             self.restore_zoom();
             false
@@ -381,6 +460,7 @@ impl SplitTreeContainer {
         if !should_restore {
             return false;
         }
+        self.drop_zoom_frame();
         self.zoomed_pane.borrow_mut().take();
         *self.last_focused.borrow_mut() = Some(target.downgrade());
         self.trigger_rebuild();
@@ -418,6 +498,7 @@ impl SplitTreeContainer {
         }
 
         self.save_focus();
+        self.drop_zoom_frame();
         self.zoomed_pane.borrow_mut().take();
         *self.last_focused.borrow_mut() = Some(new_pane.downgrade());
 
@@ -460,6 +541,7 @@ impl SplitTreeContainer {
     /// Remove a pane. Mutates the data model, then triggers async rebuild.
     pub(crate) fn remove(self: &Rc<Self>, target: &gtk::Widget) -> bool {
         self.save_focus();
+        self.drop_zoom_frame();
         self.zoomed_pane.borrow_mut().take();
 
         let (removed, successor) = {
@@ -652,13 +734,23 @@ impl SplitTreeContainer {
         // until they're unparented. Detach them all first.
         let tree = self.tree.borrow();
         let zoomed = self.zoomed_pane.borrow().clone();
+        let frame = self.zoom_frame.borrow().clone();
         if let Some(pane) = zoomed {
             if pane.parent().is_some() {
                 detach_pane_from_old_parent(&pane);
                 self.schedule_rebuild();
                 return;
             }
-            self.bin.append(&pane);
+            if let Some((frame, slot)) = frame {
+                if let Some(parent) = frame.parent().and_downcast::<gtk::Box>() {
+                    parent.remove(&frame);
+                }
+                frame.set_visible(true);
+                slot.append(&pane);
+                self.bin.append(&frame);
+            } else {
+                self.bin.append(&pane);
+            }
         } else {
             if tree_has_pane_parents(&tree) {
                 detach_panes_from_old_tree(&tree);
@@ -719,22 +811,9 @@ impl Drop for SplitTreeContainer {
 /// before it can be added to a new container.
 fn detach_panes_from_old_tree(node: &SplitNode) {
     match node {
-        SplitNode::Leaf { pane_widget } => {
-            if let Some(parent) = pane_widget.parent() {
-                if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-                    // Detach from the old Paned by clearing whichever slot holds us
-                    if paned
-                        .start_child()
-                        .map(|c| c == *pane_widget)
-                        .unwrap_or(false)
-                    {
-                        paned.set_start_child(gtk::Widget::NONE);
-                    } else {
-                        paned.set_end_child(gtk::Widget::NONE);
-                    }
-                }
-            }
-        }
+        // A pane can hang in an old Paned, or in a Box such as the zoom view
+        // frame's main slot; both must let go, or the rebuild never settles.
+        SplitNode::Leaf { pane_widget } => detach_pane_from_old_parent(pane_widget),
         SplitNode::Split { left, right, .. } => {
             detach_panes_from_old_tree(left);
             detach_panes_from_old_tree(right);

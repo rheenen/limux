@@ -636,6 +636,11 @@ pub fn create_pane(
         &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
     );
 
+    // Hidden until the zoom view has a closed plan rail to bring back.
+    let plan_btn = icon_button("view-list-bullet-symbolic", "Show plan");
+    plan_btn.set_action_name(Some("win.zoom-show-plan"));
+    plan_btn.set_visible(false);
+    actions.append(&plan_btn);
     actions.append(&new_term_btn);
     actions.append(&new_browser_btn);
     actions.append(&split_h_btn);
@@ -677,6 +682,7 @@ pub fn create_pane(
         content_drop_overlay: content_drop_overlay.clone(),
         pane_outer: outer.clone(),
         leading_box: leading_box.clone(),
+        plan_button: plan_btn.clone(),
         callbacks: callbacks.clone(),
         working_directory: ws_wd.clone(),
         workspace_dragging: workspace_dragging.clone(),
@@ -1435,6 +1441,7 @@ pub struct PaneInternals {
     content_drop_overlay: gtk::Box,
     pane_outer: gtk::Box,
     leading_box: gtk::Box,
+    plan_button: gtk::Button,
     callbacks: Rc<PaneCallbacks>,
     working_directory: Rc<std::cell::RefCell<Option<String>>>,
     workspace_dragging: Rc<Cell<bool>>,
@@ -2666,6 +2673,35 @@ pub fn add_terminal_tab_to_pane(pane_widget: &gtk::Widget) {
     }
 }
 
+/// Open a terminal tab that runs `command` (through the shell, like a
+/// restored agent command) with a fixed title. Returns the new surface id
+/// (`pane_id:tab_id`). The tab closes when the command exits.
+pub fn add_command_tab_to_pane(
+    pane_widget: &gtk::Widget,
+    title: &str,
+    command: String,
+) -> Option<String> {
+    let internals = find_pane_internals(pane_widget)?;
+    let dir = active_tab_working_directory(pane_widget)
+        .or_else(|| internals.working_directory.borrow().clone());
+    let tab_id = new_tab_id();
+    internals.callbacks.initial_command.replace(Some(command));
+    add_terminal_tab_inner(
+        &internals,
+        dir.as_deref(),
+        Some(TerminalTabOptions {
+            id: Some(&tab_id),
+            custom_name: Some(title),
+            pinned: false,
+            cwd: None,
+            agent: None,
+            ssh: None,
+        }),
+    );
+    (internals.callbacks.on_state_changed)();
+    Some(composite_surface_id(internals.pane_id, &tab_id))
+}
+
 pub fn add_terminal_tab_to_pane_in_directory(pane_widget: &gtk::Widget, directory: Option<&str>) {
     if let Some(internals) = find_pane_internals(pane_widget) {
         add_terminal_tab_inner(&internals, directory, None);
@@ -2819,6 +2855,11 @@ fn find_pane_internals(pane_widget: &gtk::Widget) -> Option<Rc<PaneInternals>> {
 /// Returns the leading slot (at the very start of the pane header) so the
 /// outer app can place widgets there (e.g. a dock toggle). The box stays
 /// empty by default.
+/// The "Show plan" button in the pane header (hidden by default).
+pub fn pane_plan_button(pane_widget: &gtk::Widget) -> Option<gtk::Button> {
+    find_pane_internals(pane_widget).map(|internals| internals.plan_button.clone())
+}
+
 pub fn pane_leading_box(pane_widget: &gtk::Widget) -> Option<gtk::Box> {
     find_pane_internals(pane_widget).map(|internals| internals.leading_box.clone())
 }

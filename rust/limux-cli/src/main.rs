@@ -259,6 +259,8 @@ Common commands:
   rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>
   read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]
   capture-pane (alias of read-screen)
+  zoom-state [--workspace <id|ref>] [--surface <id|ref>]
+      The zoom view and /dip plan rail state of the surface's workspace (JSON).
   tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]
   browser [--surface <id|ref>|<surface>] <subcommand> ...
 
@@ -4645,6 +4647,15 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
             } else {
                 CommandOutput::Text("OK".to_string())
             }
+        }
+        "zoom-state" => {
+            let params =
+                lifecycle_scope(args, Some(("--surface", "surface_id", "LIMUX_SURFACE_ID")))?;
+            CommandOutput::Json(
+                client
+                    .call("surface.zoom_state", Value::Object(params))
+                    .await?,
+            )
         }
         "read-screen" | "capture-pane" => {
             let payload = run_read_screen(client, args).await?;

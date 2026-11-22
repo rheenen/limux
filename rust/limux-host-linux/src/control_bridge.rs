@@ -260,6 +260,13 @@ pub enum ControlCommand {
         text: String,
         reply: mpsc::Sender<BridgeResult>,
     },
+    /// The zoom view and plan rail state of the surface's workspace; the
+    /// /dip mod uses it to hide its own pane while the limux rail exists.
+    ZoomState {
+        target: WorkspaceTarget,
+        surface_hint: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
     SendKey {
         target: WorkspaceTarget,
         surface_hint: Option<String>,
@@ -353,6 +360,7 @@ impl ControlCommand {
             | Self::WorkspaceGroup { reply, .. }
             | Self::GuiHook { reply, .. }
             | Self::SendText { reply, .. }
+            | Self::ZoomState { reply, .. }
             | Self::SendKey { reply, .. }
             | Self::CreateSurface { reply, .. }
             | Self::CloseSurface { reply, .. }
@@ -1447,6 +1455,25 @@ fn handle_method(
                     target,
                     surface_hint,
                     text,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.zoom_state" => {
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let surface_hint = match optional_surface_handle(params, &["surface_id"]) {
+                Ok(surface_hint) => surface_hint,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::ZoomState {
+                    target,
+                    surface_hint,
                     reply,
                 },
                 rx,

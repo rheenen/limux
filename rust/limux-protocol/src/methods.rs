@@ -239,7 +239,7 @@ pub const CORE_COMMAND_NAMES: [&str; 166] = [
     "debug.window.screenshot",
 ];
 
-pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
+pub const HOST_ONLY_COMMAND_NAMES: [&str; 13] = [
     "window.activate",
     "workspace.set_color",
     "workspace.set_group",
@@ -249,12 +249,13 @@ pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
     "workspace.group_set_color",
     "workspace.group_set_collapsed",
     "workspace.group_delete",
+    "surface.zoom_state",
     "gui_hook.list",
     "gui_hook.set",
     "gui_hook.clear",
 ];
 
-pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
+pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 51] = [
     "system.ping",
     "system.identify",
     "system.capabilities",
@@ -294,6 +295,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "surface.send_text",
     "surface.send_key",
     "surface.clear_history",
+    "surface.zoom_state",
     "notification.create",
     "tab.action",
     "gui_hook.list",
@@ -307,7 +309,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "browser.reload",
 ];
 
-pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
+pub const ALL_METHOD_SPECS: [MethodSpec; 179] = [
     shared_spec("system.ping", MethodCategory::System, &["ping"], &[]),
     shared_spec(
         "system.identify",
@@ -538,6 +540,12 @@ pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
         MethodCategory::Surface,
         &["clear-history"],
         &["clear-history"],
+    ),
+    gtk_bridge_only_spec(
+        "surface.zoom_state",
+        MethodCategory::Surface,
+        &[],
+        &["zoom-state"],
     ),
     core_only_spec("surface.action", MethodCategory::Surface, &[]),
     shared_spec(

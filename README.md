@@ -364,6 +364,8 @@ time, enable **Settings → General → Ask for folder on new workspace**.
 | `Ctrl+Shift+W` | Close focused tab |
 | `Ctrl+Alt+W` | Close focused pane |
 | `Ctrl+Shift+Z` | Toggle focused pane zoom |
+| `Ctrl+Alt+Z` | Zoom out to the /dip subagent tiles (also Ctrl+mouse wheel down) |
+| `Ctrl+Alt+Shift+Z` | Zoom in from the subagent tiles (also Ctrl+mouse wheel up) |
 | `Ctrl+Alt+M` | Toggle sidebar |
 | `Ctrl+Alt+Shift+M` | Toggle top bar |
 | `Ctrl+Alt+T` | New terminal tab |

@@ -195,6 +195,10 @@ fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInpu
         stack.add_titled(&notifications_page, Some("notifications"), "Notifications");
     notifications_stack_page.set_icon_name(Some("preferences-system-notifications-symbolic"));
 
+    let zoom_page = build_zoom_view_page(&input);
+    let zoom_stack_page = stack.add_titled(&zoom_page, Some("zoom_view"), "Zoom view");
+    zoom_stack_page.set_icon_name(Some("view-grid-symbolic"));
+
     let keybinds_page = keybind_editor::build_keybind_editor(&input.shortcuts, input.on_capture);
     let keybinds_stack_page = stack.add_titled(&keybinds_page, Some("keybindings"), "Keybindings");
     keybinds_stack_page.set_icon_name(Some("input-keyboard-symbolic"));
@@ -229,6 +233,127 @@ fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInpu
     outer.append(&header_bar);
     outer.append(&stack);
     outer.upcast()
+}
+
+/// The zoom view page: how Ctrl+wheel shows the subagents of a terminal.
+fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
+    use crate::zoom_view::config::{
+        RailState, ZoomLayout, MAX_MAIN_MIN_COLUMNS, MIN_MAIN_MIN_COLUMNS,
+    };
+
+    let page = adw::PreferencesPage::new();
+    page.set_title("Zoom view");
+    page.set_name(Some("zoom_view"));
+    page.set_icon_name(Some("view-grid-symbolic"));
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Zoom view");
+    group.set_description(Some(
+        "Ctrl+wheel down on a terminal shows the subagents of its /dip session as live tiles.",
+    ));
+    let current = input.config.borrow().zoom_view;
+
+    let row = |title: &str, subtitle: &str, suffix: &gtk::Widget| {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .build();
+        row.set_subtitle_lines(2);
+        suffix.set_valign(gtk::Align::Center);
+        row.add_suffix(suffix);
+        row.set_activatable_widget(Some(suffix));
+        group.add(&row);
+    };
+
+    let layout_labels: Vec<&str> = ZoomLayout::ALL.iter().map(|l| l.label()).collect();
+    let layout = gtk::DropDown::from_strings(&layout_labels);
+    layout.set_selected(current.layout.dropdown_index());
+    row(
+        "Layout",
+        "Focus + tiles is the default. Grid, Tree and Strip place the tiles in another way.",
+        layout.upcast_ref(),
+    );
+
+    let columns = gtk::SpinButton::with_range(
+        f64::from(MIN_MAIN_MIN_COLUMNS),
+        f64::from(MAX_MAIN_MIN_COLUMNS),
+        1.0,
+    );
+    columns.set_value(f64::from(current.main_min_columns));
+    columns.set_numeric(true);
+    row(
+        "Minimum width of the main terminal",
+        "Columns. A zoom step never makes the main terminal narrower than this.",
+        columns.upcast_ref(),
+    );
+
+    let rail_labels: Vec<&str> = RailState::ALL.iter().map(|r| r.label()).collect();
+    let rail = gtk::DropDown::from_strings(&rail_labels);
+    rail.set_selected(current.plan_rail.dropdown_index());
+    row(
+        "Plan rail when a workspace opens",
+        "The rail's own close and collapse buttons change it per workspace.",
+        rail.upcast_ref(),
+    );
+
+    let wheel = gtk::Switch::new();
+    wheel.set_active(current.ctrl_wheel);
+    row(
+        "Ctrl+wheel zooms the view",
+        "Off: Ctrl+wheel goes to the terminal, as before.",
+        wheel.upcast_ref(),
+    );
+
+    let finished = gtk::Switch::new();
+    finished.set_active(current.show_finished);
+    row(
+        "Show finished subagents",
+        "Finished runs stay as dimmed tiles below the running ones until the session ends.",
+        finished.upcast_ref(),
+    );
+
+    let update = {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        move |f: Box<dyn FnOnce(&mut crate::zoom_view::config::ZoomViewConfig)>| {
+            apply_config_change(&config, &*on_changed, move |c| f(&mut c.zoom_view));
+        }
+    };
+    let update = Rc::new(update);
+    {
+        let update = update.clone();
+        layout.connect_selected_notify(move |dropdown| {
+            let value = ZoomLayout::from_dropdown_index(dropdown.selected());
+            update(Box::new(move |z| z.layout = value));
+        });
+    }
+    {
+        let update = update.clone();
+        columns.connect_value_changed(move |spin| {
+            let value = spin.value_as_int().max(0) as u32;
+            update(Box::new(move |z| z.main_min_columns = value));
+        });
+    }
+    {
+        let update = update.clone();
+        rail.connect_selected_notify(move |dropdown| {
+            let value = RailState::from_dropdown_index(dropdown.selected());
+            update(Box::new(move |z| z.plan_rail = value));
+        });
+    }
+    {
+        let update = update.clone();
+        wheel.connect_active_notify(move |switch| {
+            let value = switch.is_active();
+            update(Box::new(move |z| z.ctrl_wheel = value));
+        });
+    }
+    finished.connect_active_notify(move |switch| {
+        let value = switch.is_active();
+        update(Box::new(move |z| z.show_finished = value));
+    });
+
+    page.add(&group);
+    page.upcast()
 }
 
 fn build_hooks_page(input: &SettingsEditorInput) -> gtk::Widget {

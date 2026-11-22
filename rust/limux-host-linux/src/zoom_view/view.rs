@@ -1,0 +1,995 @@
+//! The zoom view of one workspace: Ctrl+wheel down on a terminal folds
+//! the other splits away and shows the session's subagents as live tiles
+//! beside it; the plan rail is on every level. Ctrl+wheel up steps back;
+//! at Z0 a selected tile opens as a new tab in the same pane.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::{Rc, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use gtk::glib;
+use gtk::prelude::*;
+use gtk4 as gtk;
+
+use super::config::{RailState, ZoomLayout, ZoomViewConfig};
+use super::dip_state::{self, DipState, Run};
+use super::geometry::{self, Frame, ZoomLevel};
+use super::rail::PlanRail;
+use crate::app_config::AppConfig;
+use crate::pane;
+use crate::split_tree::SplitTreeContainer;
+use crate::terminal::{self, TerminalCallbacks, TerminalOptions, TerminalWidget};
+
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const TILE_NAME_PREFIX: &str = "limux-zoom-tile:";
+const TILE_TITLE_HEIGHT: i32 = 24;
+/// Used until the main terminal reports its size.
+const FALLBACK_CELL: (f64, f64) = (8.0, 17.0);
+
+struct Tile {
+    run_id: String,
+    frame: gtk::Box,
+    title: gtk::Label,
+    term: TerminalWidget,
+    follow: Vec<String>,
+}
+
+/// The session whose subagents the view shows: a terminal surface and
+/// the pane it lives in.
+#[derive(Clone)]
+struct Session {
+    surface_id: String,
+    pane: gtk::Widget,
+}
+
+struct LoadedState {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    state: Option<DipState>,
+}
+
+pub struct ZoomView {
+    container: Weak<SplitTreeContainer>,
+    config: Rc<RefCell<AppConfig>>,
+    frame: gtk::Grid,
+    main_slot: gtk::Box,
+    rail_holder: gtk::Box,
+    tiles_box: gtk::Box,
+    tiles_header: gtk::Label,
+    scroller: gtk::ScrolledWindow,
+    grid: gtk::Grid,
+    empty: gtk::Label,
+    indicator: gtk::Label,
+    rail: Rc<PlanRail>,
+    level: Cell<ZoomLevel>,
+    /// The session shown while zoomed (fixed) or at Z0 (follows focus).
+    session: RefCell<Option<Session>>,
+    loaded: RefCell<Option<LoadedState>>,
+    tiles: RefCell<Vec<Tile>>,
+    selected: RefCell<Option<String>>,
+    /// Promoted tab surface id -> the surface id of its parent session.
+    promoted: RefCell<HashMap<String, String>>,
+    last_size: Cell<(i32, i32)>,
+    tile_height: Cell<f64>,
+    grid_columns: Cell<u32>,
+    timer: RefCell<Option<glib::SourceId>>,
+    /// Called when `status()` changes (the top bar follows it).
+    on_change: RefCell<Option<Rc<dyn Fn()>>>,
+    last_status: Cell<Option<ZoomStatus>>,
+}
+
+/// What the top-bar zoom buttons show for a workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoomStatus {
+    pub level: ZoomLevel,
+    /// True when a zoom-out has something to show (or the view is zoomed).
+    pub can_zoom: bool,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn place(
+    grid: &gtk::Grid,
+    child: &impl IsA<gtk::Widget>,
+    column: i32,
+    row: i32,
+    width: i32,
+    height: i32,
+) {
+    let Some(layout_child) = grid
+        .layout_manager()
+        .map(|manager| manager.layout_child(child))
+        .and_then(|child| child.downcast::<gtk::GridLayoutChild>().ok())
+    else {
+        return;
+    };
+    layout_child.set_column(column);
+    layout_child.set_row(row);
+    layout_child.set_column_span(width);
+    layout_child.set_row_span(height);
+}
+
+/// The run id of the tile at or above `widget`, if any.
+pub fn tile_run_at(widget: &gtk::Widget) -> Option<String> {
+    let mut current = Some(widget.clone());
+    while let Some(widget) = current {
+        if let Some(id) = widget.widget_name().strip_prefix(TILE_NAME_PREFIX) {
+            return Some(id.to_string());
+        }
+        current = widget.parent();
+    }
+    None
+}
+
+fn install_css() {
+    thread_local! {
+        static INSTALLED: Cell<bool> = const { Cell::new(false) };
+    }
+    if INSTALLED.with(|done| done.replace(true)) {
+        return;
+    }
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(
+        ".limux-plan-rail { border-left: 1px solid alpha(currentColor, 0.12); }\n\
+         .limux-zoom-tile { border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; }\n\
+         .limux-zoom-tile-done { opacity: 0.6; }\n\
+         .limux-zoom-tile-selected { border: 2px solid #f0b45e; }\n\
+         .limux-zoom-tile-title { padding: 2px 8px; font-size: 0.9em; }\n\
+         .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n",
+    );
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+impl ZoomView {
+    pub fn new(container: &Rc<SplitTreeContainer>, config: Rc<RefCell<AppConfig>>) -> Rc<Self> {
+        install_css();
+        let initial_rail = config.borrow().zoom_view.plan_rail;
+        let rail = PlanRail::new(initial_rail);
+
+        let frame = gtk::Grid::new();
+        frame.set_hexpand(true);
+        frame.set_vexpand(true);
+        frame.set_column_spacing(0);
+        frame.set_row_spacing(0);
+        let main_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main_slot.set_vexpand(true);
+        let rail_holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        rail_holder.set_vexpand(true);
+        rail_holder.set_hexpand(false);
+
+        let tiles_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        tiles_box.set_hexpand(true);
+        tiles_box.set_vexpand(true);
+        tiles_box.set_margin_start(6);
+        tiles_box.set_margin_end(6);
+        tiles_box.set_margin_top(4);
+        let tiles_header = gtk::Label::new(None);
+        tiles_header.set_xalign(0.0);
+        tiles_header.add_css_class("dim-label");
+        let grid = gtk::Grid::new();
+        grid.set_column_spacing(geometry::TILE_GAP as u32);
+        grid.set_row_spacing(geometry::TILE_GAP as u32);
+        grid.set_column_homogeneous(true);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .hexpand(true)
+            .child(&grid)
+            .build();
+        let empty = gtk::Label::new(Some("No subagents in this session"));
+        empty.add_css_class("dim-label");
+        empty.set_vexpand(true);
+        let indicator = gtk::Label::new(None);
+        indicator.add_css_class("limux-zoom-indicator");
+        indicator.add_css_class("dim-label");
+        indicator.set_visible(false);
+        tiles_box.append(&tiles_header);
+        tiles_box.append(&scroller);
+        tiles_box.append(&empty);
+        tiles_box.append(&indicator);
+
+        frame.attach(&main_slot, 0, 0, 1, 1);
+        frame.attach(&rail_holder, 1, 0, 1, 1);
+        frame.attach(&tiles_box, 2, 0, 1, 1);
+
+        let view = Rc::new(Self {
+            container: Rc::downgrade(container),
+            config,
+            frame,
+            main_slot,
+            rail_holder,
+            tiles_box,
+            tiles_header,
+            scroller,
+            grid,
+            empty,
+            indicator,
+            rail,
+            level: Cell::new(ZoomLevel::Z0),
+            session: RefCell::new(None),
+            loaded: RefCell::new(None),
+            tiles: RefCell::default(),
+            selected: RefCell::new(None),
+            promoted: RefCell::default(),
+            last_size: Cell::new((0, 0)),
+            tile_height: Cell::new(0.0),
+            grid_columns: Cell::new(1),
+            timer: RefCell::new(None),
+            on_change: RefCell::new(None),
+            last_status: Cell::new(None),
+        });
+
+        container.rail_slot().append(&view.rail.root);
+        {
+            let weak = Rc::downgrade(&view);
+            container.set_on_frame_dropped(move || {
+                if let Some(view) = weak.upgrade() {
+                    view.frame_dropped();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            view.rail.connect_select_run(move |run| {
+                if let Some(view) = weak.upgrade() {
+                    view.select(Some(run.to_string()));
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            view.rail.connect_pick_plan(move |plan| {
+                if let Some(view) = weak.upgrade() {
+                    view.write_plan_choice(plan);
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            view.rail.connect_mode_changed(move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.sync_show_buttons();
+                    view.relayout();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            view.scroller.vadjustment().connect_value_changed(move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.update_indicator();
+                }
+            });
+        }
+
+        let weak = Rc::downgrade(&view);
+        let source = glib::timeout_add_local(POLL_INTERVAL, move || {
+            let Some(view) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            view.poll();
+            glib::ControlFlow::Continue
+        });
+        *view.timer.borrow_mut() = Some(source);
+        view
+    }
+
+    fn zoom_config(&self) -> ZoomViewConfig {
+        self.config.borrow().zoom_view
+    }
+
+    pub fn level(&self) -> ZoomLevel {
+        self.level.get()
+    }
+
+    pub fn rail_mode(&self) -> RailState {
+        self.rail.mode()
+    }
+
+    pub fn rail_visible(&self) -> bool {
+        self.rail.root.is_visible()
+    }
+
+    pub fn status(&self) -> ZoomStatus {
+        let level = self.level.get();
+        ZoomStatus {
+            level,
+            can_zoom: level.is_zoomed() || !self.tile_runs().is_empty(),
+        }
+    }
+
+    /// `callback` runs when `status()` changes. It runs from inside the
+    /// view, so it must not borrow state that the caller holds; defer.
+    pub fn connect_status_changed(&self, callback: impl Fn() + 'static) {
+        *self.on_change.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    fn notify_status(&self) {
+        let status = self.status();
+        if self.last_status.replace(Some(status)) == Some(status) {
+            return;
+        }
+        let callback = self.on_change.borrow().clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    pub fn show_rail(&self) {
+        self.rail.set_mode(RailState::Open);
+    }
+
+    /// Stop the poll and end every tile's surface (workspace closes).
+    pub fn shutdown(&self) {
+        if let Some(source) = self.timer.borrow_mut().take() {
+            source.remove();
+        }
+        for tile in self.tiles.borrow_mut().drain(..) {
+            tile.term.handle.shutdown();
+        }
+    }
+
+    /// The settings changed: apply the layout and the finished-tile filter.
+    pub fn apply_config(self: &Rc<Self>) {
+        self.sync_tiles();
+        self.relayout();
+    }
+
+    // -- Sessions and the state file ------------------------------------
+
+    fn session_for_pane(&self, pane: &gtk::Widget) -> Option<Session> {
+        let surface = pane::active_surface_summary(pane)?;
+        if surface.kind != "terminal" {
+            return None;
+        }
+        let surface_id = self
+            .promoted
+            .borrow()
+            .get(&surface.surface_id)
+            .cloned()
+            .unwrap_or(surface.surface_id);
+        Some(Session {
+            surface_id,
+            pane: pane.clone(),
+        })
+    }
+
+    /// The pane in this workspace that holds the keyboard focus.
+    fn focused_pane(&self) -> Option<gtk::Widget> {
+        let container = self.container.upgrade()?;
+        let window = container.widget().root()?.downcast::<gtk::Window>().ok()?;
+        let mut current = gtk::prelude::GtkWindowExt::focus(&window);
+        while let Some(widget) = current {
+            if pane::is_pane_widget(&widget) && container.contains(&widget) {
+                return Some(widget);
+            }
+            current = widget.parent();
+        }
+        None
+    }
+
+    fn set_session(self: &Rc<Self>, session: Option<Session>) {
+        let same = match (self.session.borrow().as_ref(), session.as_ref()) {
+            (Some(a), Some(b)) => a.surface_id == b.surface_id,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        *self.session.borrow_mut() = session;
+        *self.loaded.borrow_mut() = None;
+        *self.selected.borrow_mut() = None;
+        self.reload();
+    }
+
+    /// Read the session's state file again when its mtime changed.
+    /// Returns true when the shown state changed.
+    fn reload(self: &Rc<Self>) -> bool {
+        let Some(surface_id) = self.session.borrow().as_ref().map(|s| s.surface_id.clone()) else {
+            let had = self
+                .loaded
+                .borrow_mut()
+                .take()
+                .is_some_and(|l| l.state.is_some());
+            if had {
+                self.state_changed();
+            }
+            return had;
+        };
+        let Some(dir) = dip_state::state_dir() else {
+            return false;
+        };
+        let path = dir.join(dip_state::state_file_name(&surface_id));
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let unchanged = self
+            .loaded
+            .borrow()
+            .as_ref()
+            .is_some_and(|l| l.path == path && l.modified == modified);
+        let mut state = if unchanged {
+            self.loaded.borrow().as_ref().and_then(|l| l.state.clone())
+        } else {
+            modified
+                .and_then(|_| std::fs::read_to_string(&path).ok())
+                .and_then(|raw| match dip_state::parse(&raw) {
+                    Ok(state) => Some(state),
+                    Err(err) => {
+                        eprintln!("limux: zoom view: {}: {err}", path.display());
+                        None
+                    }
+                })
+        };
+        // The session ended: its heartbeat stopped.
+        if state.as_ref().is_some_and(|s| s.is_stale(now_ms())) {
+            state = None;
+        }
+        let changed = self.loaded.borrow().as_ref().map(|l| &l.state) != Some(&state);
+        *self.loaded.borrow_mut() = Some(LoadedState {
+            path,
+            modified,
+            state,
+        });
+        if changed {
+            self.state_changed();
+        }
+        changed
+    }
+
+    fn current_state(&self) -> Option<DipState> {
+        self.loaded.borrow().as_ref().and_then(|l| l.state.clone())
+    }
+
+    fn state_changed(self: &Rc<Self>) {
+        let state = self.current_state();
+        self.rail.update(state.as_ref());
+        self.sync_show_buttons();
+        if self.level.get().is_zoomed() {
+            self.sync_tiles();
+            self.relayout();
+        }
+    }
+
+    fn poll(self: &Rc<Self>) {
+        if !self.level.get().is_zoomed() {
+            if let Some(pane) = self.focused_pane() {
+                let session = self.session_for_pane(&pane);
+                self.set_session(session);
+            }
+        }
+        self.reload();
+        if self.level.get().is_zoomed() {
+            let size = self.size();
+            if size != self.last_size.get() {
+                self.relayout();
+            }
+        }
+        self.notify_status();
+    }
+
+    fn write_plan_choice(&self, plan: &str) {
+        let Some(surface_id) = self.session.borrow().as_ref().map(|s| s.surface_id.clone()) else {
+            return;
+        };
+        let Some(dir) = dip_state::state_dir() else {
+            return;
+        };
+        let path = dir.join(dip_state::select_file_name(&surface_id));
+        let tmp = path.with_extension("json.tmp");
+        let body = serde_json::json!({ "plan": plan }).to_string();
+        let result = std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&tmp, body))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(err) = result {
+            eprintln!("limux: zoom view: cannot write {}: {err}", path.display());
+        }
+    }
+
+    fn sync_show_buttons(&self) {
+        let Some(container) = self.container.upgrade() else {
+            return;
+        };
+        // Only the pane of the session gets the button: the plan belongs
+        // to that terminal, not to its neighbours.
+        let session_pane = self
+            .session
+            .borrow()
+            .as_ref()
+            .filter(|_| self.rail.wants_show_button())
+            .map(|session| session.pane.clone());
+        for pane in container.panes() {
+            if let Some(button) = pane::pane_plan_button(&pane) {
+                button.set_visible(session_pane.as_ref() == Some(&pane));
+            }
+        }
+    }
+
+    // -- Tiles ----------------------------------------------------------
+
+    fn tile_runs(&self) -> Vec<Run> {
+        let show_finished = self.zoom_config().show_finished;
+        self.current_state()
+            .map(|state| {
+                state
+                    .tile_runs(show_finished)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn make_tile(self: &Rc<Self>, run: &Run) -> Option<Tile> {
+        let command = dip_state::shell_command(&run.follow)?;
+        let config = self.config.borrow();
+        let term = terminal::create_terminal(
+            None,
+            TerminalOptions {
+                suppress_initial_focus: true,
+                saved_font_size: config.font_size,
+                startup_command: Some(command),
+                ..TerminalOptions::default()
+            },
+            TerminalCallbacks::disconnected(),
+        );
+        drop(config);
+        // Read-only: clicks select the tile and the wheel scrolls the list.
+        term.root.set_can_target(false);
+        term.root.set_vexpand(true);
+
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        frame.add_css_class("limux-zoom-tile");
+        frame.set_widget_name(&format!("{TILE_NAME_PREFIX}{}", run.id));
+        frame.set_overflow(gtk::Overflow::Hidden);
+        let title = gtk::Label::new(None);
+        title.set_xalign(0.0);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.add_css_class("limux-zoom-tile-title");
+        title.set_size_request(-1, TILE_TITLE_HEIGHT);
+        frame.append(&title);
+        frame.append(&term.root);
+
+        let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        let run_id = run.id.clone();
+        click.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(view) = weak.upgrade() {
+                view.select(Some(run_id.clone()));
+            }
+        });
+        frame.add_controller(click);
+
+        self.grid.attach(&frame, 0, 0, 1, 1);
+        Some(Tile {
+            run_id: run.id.clone(),
+            frame,
+            title,
+            term,
+            follow: run.follow.clone(),
+        })
+    }
+
+    /// Make the tiles match the runs: new tiles for new runs, and the
+    /// surfaces of removed runs end. A tile keeps its surface while its
+    /// run stays, so its output is not lost on a state change.
+    fn sync_tiles(self: &Rc<Self>) {
+        let runs = self.tile_runs();
+        let mut tiles = self.tiles.borrow_mut();
+        tiles.retain(|tile| {
+            let keep = runs
+                .iter()
+                .any(|run| run.id == tile.run_id && run.follow == tile.follow);
+            if !keep {
+                tile.term.handle.shutdown();
+                self.grid.remove(&tile.frame);
+            }
+            keep
+        });
+        let mut ordered = Vec::with_capacity(runs.len());
+        for run in &runs {
+            let index = tiles.iter().position(|tile| tile.run_id == run.id);
+            let tile = match index {
+                Some(index) => tiles.remove(index),
+                None => match self.make_tile(run) {
+                    Some(tile) => tile,
+                    None => continue,
+                },
+            };
+            let model = run
+                .model
+                .as_deref()
+                .map(|m| format!(" · {m}"))
+                .unwrap_or_default();
+            tile.title
+                .set_label(&format!("{} {}{model}", run.status.glyph(), run.name));
+            if run.status.is_running() {
+                tile.frame.remove_css_class("limux-zoom-tile-done");
+            } else {
+                tile.frame.add_css_class("limux-zoom-tile-done");
+            }
+            ordered.push(tile);
+        }
+        *tiles = ordered;
+        drop(tiles);
+        self.sync_selection();
+    }
+
+    pub fn select(&self, run_id: Option<String>) {
+        *self.selected.borrow_mut() = run_id;
+        self.sync_selection();
+        let selected = self.selected.borrow().clone();
+        if let Some(tile) = selected.as_deref().and_then(|id| {
+            self.tiles
+                .borrow()
+                .iter()
+                .find(|t| t.run_id == id)
+                .map(|t| t.frame.clone())
+        }) {
+            if let Some(bounds) = tile.compute_bounds(&self.grid) {
+                let adj = self.scroller.vadjustment();
+                let top = f64::from(bounds.y());
+                let bottom = top + f64::from(bounds.height());
+                if top < adj.value() || bottom > adj.value() + adj.page_size() {
+                    adj.set_value(top);
+                }
+            }
+        }
+    }
+
+    fn sync_selection(&self) {
+        let selected = self.selected.borrow();
+        for tile in self.tiles.borrow().iter() {
+            if selected.as_deref() == Some(tile.run_id.as_str()) {
+                tile.frame.add_css_class("limux-zoom-tile-selected");
+            } else {
+                tile.frame.remove_css_class("limux-zoom-tile-selected");
+            }
+        }
+    }
+
+    // -- Zoom steps -----------------------------------------------------
+
+    /// Ctrl+wheel down over `pane` (a pane of this workspace). Returns
+    /// false when there is nothing to zoom to, so the wheel goes to the
+    /// terminal as before.
+    pub fn zoom_out(self: &Rc<Self>, pane: Option<&gtk::Widget>) -> bool {
+        let Some(container) = self.container.upgrade() else {
+            return false;
+        };
+        let level = self.level.get();
+        if level.is_zoomed() {
+            self.set_level(level.out());
+            return true;
+        }
+        let Some(pane) = pane else {
+            return false;
+        };
+        let Some(session) = self.session_for_pane(pane) else {
+            return false;
+        };
+        self.set_session(Some(session));
+        self.reload();
+        if self.tile_runs().is_empty() {
+            return false;
+        }
+        // Move the rail into the frame, then show the frame.
+        if let Some(parent) = self.rail.root.parent().and_downcast::<gtk::Box>() {
+            parent.remove(&self.rail.root);
+        }
+        self.rail_holder.append(&self.rail.root);
+        if !container.enter_zoom_frame(pane, self.frame.clone().upcast(), self.main_slot.clone()) {
+            self.return_rail(&container);
+            return false;
+        }
+        self.level.set(ZoomLevel::Z1);
+        self.sync_tiles();
+        self.relayout();
+        self.notify_status();
+        true
+    }
+
+    /// The zoom-out shortcut: zoom out of the focused pane (or one more
+    /// step when the view is zoomed already).
+    pub fn zoom_out_focused(self: &Rc<Self>) -> bool {
+        let pane = self.focused_pane();
+        self.zoom_out(pane.as_ref())
+    }
+
+    /// A top-bar level button: go straight to `target`. Z0 returns
+    /// without a promotion; a deeper level zooms out of the focused pane
+    /// first. Returns false when there is nothing to zoom to.
+    pub fn go_to(self: &Rc<Self>, target: ZoomLevel) -> bool {
+        let level = self.level.get();
+        if target == level {
+            return true;
+        }
+        if !target.is_zoomed() {
+            self.leave();
+            return true;
+        }
+        if !level.is_zoomed() && !self.zoom_out_focused() {
+            return false;
+        }
+        self.set_level(target);
+        true
+    }
+
+    /// Ctrl+wheel up. `pointer_run` is the tile under the pointer, if any.
+    /// From Z1 the view returns to Z0; the selected tile (or the one under
+    /// the pointer) then opens as a new tab in the session's pane.
+    pub fn zoom_in(self: &Rc<Self>, pointer_run: Option<String>) -> bool {
+        let level = self.level.get();
+        if !level.is_zoomed() {
+            return false;
+        }
+        if level > ZoomLevel::Z1 {
+            if let Some(run) = pointer_run {
+                if self.selected.borrow().is_none() {
+                    self.select(Some(run));
+                }
+            }
+            self.set_level(level.r#in());
+            return true;
+        }
+        let target = self.selected.borrow().clone().or(pointer_run);
+        let run = target.and_then(|id| self.current_state()?.run(&id).cloned());
+        let session = self.session.borrow().clone();
+        self.leave();
+        if let (Some(run), Some(session)) = (run, session) {
+            self.promote(&session, &run);
+        }
+        true
+    }
+
+    fn set_level(&self, level: ZoomLevel) {
+        if self.level.replace(level) != level {
+            self.relayout();
+        }
+        self.notify_status();
+    }
+
+    fn return_rail(&self, container: &SplitTreeContainer) {
+        if let Some(parent) = self.rail.root.parent().and_downcast::<gtk::Box>() {
+            parent.remove(&self.rail.root);
+        }
+        container.rail_slot().append(&self.rail.root);
+    }
+
+    /// Back to Z0: the splits return. The tiles keep their surfaces; they
+    /// are unmapped, so they stop drawing.
+    fn leave(&self) {
+        self.level.set(ZoomLevel::Z0);
+        *self.selected.borrow_mut() = None;
+        self.sync_selection();
+        if let Some(container) = self.container.upgrade() {
+            self.return_rail(&container);
+            container.leave_zoom_frame();
+        }
+        self.notify_status();
+    }
+
+    /// The split container dropped the frame (a split, a close, or the
+    /// pane-zoom toggle).
+    fn frame_dropped(&self) {
+        self.level.set(ZoomLevel::Z0);
+        *self.selected.borrow_mut() = None;
+        self.sync_selection();
+        if let Some(container) = self.container.upgrade() {
+            self.return_rail(&container);
+        }
+        self.notify_status();
+    }
+
+    fn promote(&self, session: &Session, run: &Run) {
+        let argv = run.chat.as_ref().unwrap_or(&run.follow);
+        let Some(command) = dip_state::shell_command(argv) else {
+            return;
+        };
+        if let Some(surface) = pane::add_command_tab_to_pane(&session.pane, &run.name, command) {
+            self.promoted
+                .borrow_mut()
+                .insert(surface, session.surface_id.clone());
+        }
+    }
+
+    // -- Layout ---------------------------------------------------------
+
+    fn size(&self) -> (i32, i32) {
+        self.container
+            .upgrade()
+            .map(|c| (c.widget().width(), c.widget().height()))
+            .unwrap_or_default()
+    }
+
+    fn cell_size(&self) -> (f64, f64) {
+        let Some(session) = self.session.borrow().clone() else {
+            return FALLBACK_CELL;
+        };
+        let Some((_, handle)) = pane::terminal_handle_for_surface(&session.pane, None) else {
+            return FALLBACK_CELL;
+        };
+        let health = handle.health();
+        if health.columns == 0 || health.rows == 0 {
+            return FALLBACK_CELL;
+        }
+        let scale = f64::from(self.main_slot.scale_factor().max(1));
+        (
+            f64::from(health.width_px) / scale / f64::from(health.columns),
+            f64::from(health.height_px) / scale / f64::from(health.rows),
+        )
+    }
+
+    fn relayout(&self) {
+        if !self.level.get().is_zoomed() {
+            return;
+        }
+        let config = self.zoom_config();
+        let (width, height) = self.size();
+        self.last_size.set((width, height));
+        let (cell_width, cell_height) = self.cell_size();
+        let frame = Frame {
+            width: f64::from(width),
+            height: f64::from(height),
+            cell_width,
+            cell_height,
+            rail_width: self.rail.width(),
+            main_min_columns: config.main_min_columns,
+        };
+        let level = self.level.get();
+        let placement = geometry::place(config.layout, frame, level);
+
+        let tiles = self.tiles.borrow();
+        let tile_px_height = (f64::from(placement.tile_rows) * cell_height).round() as i32;
+        let side_by_side = matches!(config.layout, ZoomLayout::Focus | ZoomLayout::Grid);
+        if side_by_side {
+            place(&self.frame, &self.main_slot, 0, 0, 1, 1);
+            place(&self.frame, &self.rail_holder, 1, 0, 1, 1);
+            place(&self.frame, &self.tiles_box, 2, 0, 1, 1);
+            self.main_slot.set_hexpand(false);
+            self.main_slot.set_vexpand(true);
+            self.main_slot
+                .set_size_request(placement.main_px.round() as i32, -1);
+            self.tiles_box.set_vexpand(true);
+            self.scroller.set_propagate_natural_height(false);
+            self.scroller.set_max_content_height(-1);
+        } else {
+            place(&self.frame, &self.main_slot, 0, 0, 1, 1);
+            place(&self.frame, &self.tiles_box, 0, 1, 1, 1);
+            place(&self.frame, &self.rail_holder, 1, 0, 1, 2);
+            // The tile row takes its natural height and the main terminal
+            // the rest. A fixed main height would push the frame past the
+            // workspace when the real tile chrome is taller than the
+            // estimate, and `size()` would then read the larger height.
+            self.main_slot.set_hexpand(true);
+            self.main_slot.set_vexpand(true);
+            self.main_slot.set_size_request(-1, -1);
+            self.tiles_box.set_vexpand(false);
+            // The tree scrolls through its rows; cap it at half the frame.
+            let cap = if config.layout == ZoomLayout::Tree {
+                height / 2
+            } else {
+                -1
+            };
+            self.scroller.set_max_content_height(cap);
+            self.scroller.set_propagate_natural_height(true);
+        }
+
+        let mut columns = placement.grid_columns.max(1);
+        if config.layout == ZoomLayout::Grid {
+            // Option B: one more grid column while tiles stay readable.
+            let tile_area = frame.width - frame.rail_width - placement.main_px;
+            let wider = columns + 1;
+            let each = (tile_area - geometry::TILE_GAP * f64::from(columns)) / f64::from(wider);
+            if each / cell_width >= f64::from(geometry::MIN_TILE_COLUMNS) {
+                columns = wider;
+            }
+        }
+        let strip = config.layout == ZoomLayout::Strip;
+        self.scroller.set_hscrollbar_policy(if strip {
+            gtk::PolicyType::Automatic
+        } else {
+            gtk::PolicyType::Never
+        });
+        self.scroller.set_vscrollbar_policy(if strip {
+            gtk::PolicyType::Never
+        } else {
+            gtk::PolicyType::Automatic
+        });
+        self.grid.set_column_homogeneous(!strip);
+
+        let state = self.current_state();
+        let mut per_depth: HashMap<usize, i32> = HashMap::new();
+        for (index, tile) in tiles.iter().enumerate() {
+            let index = index as i32;
+            let (column, row) = match config.layout {
+                ZoomLayout::Strip => (index, 0),
+                ZoomLayout::Tree => {
+                    let depth = state
+                        .as_ref()
+                        .and_then(|s| s.run(&tile.run_id).map(|run| s.depth(run)))
+                        .unwrap_or(0);
+                    let slot = per_depth.entry(depth).or_insert(0);
+                    let column = *slot;
+                    *slot += 1;
+                    (column, depth as i32)
+                }
+                ZoomLayout::Focus | ZoomLayout::Grid => {
+                    (index % columns as i32, index / columns as i32)
+                }
+            };
+            place(&self.grid, &tile.frame, column, row, 1, 1);
+            tile.term.root.set_size_request(-1, tile_px_height);
+            let width = if strip || config.layout == ZoomLayout::Tree {
+                (f64::from(placement.tile_columns) * cell_width + geometry::TILE_CHROME_WIDTH)
+                    .round() as i32
+            } else {
+                -1
+            };
+            tile.frame.set_size_request(width, -1);
+        }
+        self.tile_height
+            .set(f64::from(tile_px_height + TILE_TITLE_HEIGHT) + geometry::TILE_GAP);
+        self.grid_columns.set(columns);
+
+        let running = tiles
+            .iter()
+            .filter(|tile| {
+                state
+                    .as_ref()
+                    .and_then(|s| s.run(&tile.run_id))
+                    .is_some_and(|run| run.status.is_running())
+            })
+            .count();
+        let level_name = format!("{level:?}");
+        self.tiles_header.set_label(&format!(
+            "{} subagents · {running} running · {level_name}",
+            tiles.len()
+        ));
+        let has_tiles = !tiles.is_empty();
+        drop(tiles);
+        self.scroller.set_visible(has_tiles);
+        self.empty.set_visible(!has_tiles);
+        self.update_indicator();
+    }
+
+    /// "N more subagents below · scroll", hidden at the end of the list.
+    fn update_indicator(&self) {
+        let adj = self.scroller.vadjustment();
+        let below = (adj.upper() - (adj.value() + adj.page_size())).max(0.0);
+        let tile_height = self.tile_height.get();
+        let total = self.tiles.borrow().len() as u32;
+        let hidden = if tile_height <= 0.0 || below < 1.0 {
+            0
+        } else {
+            let rows = (below / tile_height).ceil() as u32;
+            (rows * self.grid_columns.get()).min(total)
+        };
+        let strip = self.zoom_config().layout == ZoomLayout::Strip;
+        self.indicator.set_visible(hidden > 0 && !strip);
+        let noun = if hidden == 1 { "subagent" } else { "subagents" };
+        self.indicator
+            .set_label(&format!("{hidden} more {noun} below · scroll"));
+    }
+}
+
+impl Drop for ZoomView {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
