@@ -52,7 +52,7 @@ pub fn level_hint(
         level_meaning(level)
     )];
     if !can_zoom {
-        lines.push("No /dip subagents in the focused terminal".to_string());
+        lines.push(NO_SUBAGENTS.to_string());
     }
     let keys: Vec<String> = [("zoom out", zoom_out), ("zoom in", zoom_in)]
         .into_iter()
@@ -74,6 +74,23 @@ pub fn level_enabled(level: ZoomLevel, status: ZoomStatus) -> bool {
         status.level.is_zoomed()
     }
 }
+
+/// The filter buttons only act on /dip runs, so they follow the same
+/// rule as the deeper levels: usable only when there are subagents.
+pub fn filters_enabled(status: ZoomStatus) -> bool {
+    status.can_zoom
+}
+
+/// The tooltip of a filter button: its own hint, plus why it is off.
+pub fn filter_hint(hint: &str, enabled: bool) -> String {
+    if enabled {
+        hint.to_string()
+    } else {
+        format!("{hint}\n{NO_SUBAGENTS}")
+    }
+}
+
+const NO_SUBAGENTS: &str = "No /dip subagents in the focused terminal";
 
 pub fn hide_done_hint(on: bool) -> &'static str {
     if on {
@@ -182,12 +199,14 @@ impl ZoomBar {
                 hide_shells_hint(status.filter.hide_shells),
             ),
         ] {
+            let enabled = filters_enabled(status);
+            button.set_sensitive(enabled);
             if on {
                 button.add_css_class(FILTER_ON_CSS);
             } else {
                 button.remove_css_class(FILTER_ON_CSS);
             }
-            button.set_tooltip_text(Some(hint));
+            button.set_tooltip_text(Some(&filter_hint(hint, enabled)));
             button.update_state(&[gtk::accessible::State::Pressed(if on {
                 gtk::AccessibleTristate::True
             } else {
@@ -212,7 +231,8 @@ fn install_css() {
         ".limux-zoom-level { min-width: 28px; padding: 0 6px; font-size: 0.85em; }\n\
          .limux-zoom-level-active { background: alpha(#f0b45e, 0.35); font-weight: bold; }\n\
          .limux-zoom-filter { padding: 0 8px; font-size: 0.85em; }\n\
-         .limux-zoom-filter-on { background: alpha(#6aa6ff, 0.3); }\n",
+         .limux-zoom-filter-on { background: alpha(#6aa6ff, 0.3); }\n\
+         .limux-zoom-level:disabled, .limux-zoom-filter:disabled { opacity: 0.35; }\n",
     );
     gtk::style_context_add_provider_for_display(
         &display,
@@ -231,6 +251,17 @@ mod tests {
             can_zoom,
             filter: Default::default(),
         }
+    }
+
+    #[test]
+    fn filters_are_usable_only_with_subagents() {
+        assert!(!filters_enabled(status(ZoomLevel::Z0, false)));
+        assert!(filters_enabled(status(ZoomLevel::Z0, true)));
+        assert!(filters_enabled(status(ZoomLevel::Z2, true)));
+        let off = filter_hint(hide_shells_hint(false), false);
+        assert!(off.starts_with("Hide background shells"));
+        assert!(off.ends_with("No /dip subagents in the focused terminal"));
+        assert_eq!(filter_hint("x", true), "x");
     }
 
     #[test]
