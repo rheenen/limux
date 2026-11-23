@@ -217,8 +217,8 @@ impl ZoomBar {
 }
 
 /// Two classes per selector: the app CSS sets `.limux-top-bar-btn`
-/// (background none, dim text) at the same priority and loads again
-/// after a settings change, so a one-class rule here would lose to it.
+/// (background none, dim text) and loads again after a settings change.
+/// The provider goes in at `CSS_PRIORITY`, above a theme's user CSS.
 const ZOOM_BAR_CSS: &str = "\
 .limux-top-bar-btn.limux-zoom-level { min-width: 28px; padding: 0 6px; font-size: 0.85em; }\n\
 .limux-top-bar-btn.limux-zoom-level-active { background: alpha(#f0b45e, 0.35); color: @window_fg_color; font-weight: bold; }\n\
@@ -238,11 +238,7 @@ fn install_css() {
     };
     let provider = gtk::CssProvider::new();
     provider.load_from_data(ZOOM_BAR_CSS);
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    gtk::style_context_add_provider_for_display(&display, &provider, super::CSS_PRIORITY);
 }
 
 #[cfg(test)]

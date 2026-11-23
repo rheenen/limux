@@ -86,7 +86,15 @@ pub struct PlanRail {
     on_pick_plan: RefCell<Option<Box<RunCallback>>>,
     on_mode_changed: RefCell<Option<Box<ModeCallback>>>,
     on_width_changed: RefCell<Option<Box<WidthCallback>>>,
+    /// "Subagents" (open rail) and its icon on the strip: at Z0 they zoom
+    /// out to Z1, so the way to the tiles is visible.
+    zoom_button: gtk::Button,
+    strip_zoom: gtk::Button,
+    on_zoom: RefCell<Option<Box<dyn Fn()>>>,
 }
+
+pub const ZOOM_BUTTON_HINT: &str =
+    "Show the subagents as live tiles next to this terminal (zoom level 1).\nCtrl+mouse wheel down over the terminal also does this.";
 
 fn node_glyph(status: NodeStatus) -> &'static str {
     match status {
@@ -97,6 +105,37 @@ fn node_glyph(status: NodeStatus) -> &'static str {
         NodeStatus::Blocked => "⊘",
         NodeStatus::Unknown => "·",
     }
+}
+
+/// The colour class of a plan node, as the /dip pane colours its tree:
+/// active yellow, done green, failed red, blocked as a run at its limit.
+/// A node still to do has none; it is dim.
+pub(super) fn node_css(status: NodeStatus) -> Option<&'static str> {
+    match status {
+        NodeStatus::Active => Some(status_css(RunStatus::Running)),
+        NodeStatus::Done => Some(status_css(RunStatus::Done)),
+        NodeStatus::Failed => Some(status_css(RunStatus::Failed)),
+        NodeStatus::Blocked => Some(status_css(RunStatus::Limit)),
+        NodeStatus::Todo | NodeStatus::Unknown => None,
+    }
+}
+
+/// One row of the rail: its text, the colour class (None: dim), and the
+/// summary line under it.
+struct RailRow {
+    text: String,
+    depth: usize,
+    run: Option<String>,
+    css: Option<&'static str>,
+    summary: Option<String>,
+}
+
+/// The summary line under a run, or None when it has none.
+fn summary_of(run: &Run) -> Option<String> {
+    run.summary
+        .as_deref()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
 }
 
 fn flat_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -166,6 +205,19 @@ impl PlanRail {
         let hide_done = gtk::CheckButton::with_label("Hide done");
         hide_done.set_margin_start(8);
 
+        let zoom_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        zoom_content.set_halign(gtk::Align::Center);
+        zoom_content.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
+        zoom_content.append(&gtk::Label::new(Some("Subagents")));
+        let zoom_button = gtk::Button::new();
+        zoom_button.set_child(Some(&zoom_content));
+        zoom_button.add_css_class("limux-plan-rail-zoom");
+        zoom_button.set_focus_on_click(false);
+        zoom_button.set_margin_start(8);
+        zoom_button.set_margin_end(8);
+        zoom_button.set_tooltip_text(Some(ZOOM_BUTTON_HINT));
+        zoom_button.set_visible(false);
+
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::None);
         list.set_activate_on_single_click(true);
@@ -177,6 +229,7 @@ impl PlanRail {
             .build();
 
         open_panel.append(&header);
+        open_panel.append(&zoom_button);
         open_panel.append(&picker);
         open_panel.append(&hide_done);
         open_panel.append(&scroller);
@@ -197,8 +250,12 @@ impl PlanRail {
         let strip_stats = gtk::Box::new(gtk::Orientation::Vertical, 10);
         strip_stats.set_margin_top(4);
         strip_stats.set_halign(gtk::Align::Center);
+        let strip_zoom = flat_button("view-grid-symbolic", ZOOM_BUTTON_HINT);
+        strip_zoom.set_halign(gtk::Align::Center);
+        strip_zoom.set_visible(false);
         strip.append(&expand);
         strip.append(&strip_close);
+        strip.append(&strip_zoom);
         strip.append(&strip_separator);
         strip.append(&strip_stats);
         strip.set_cursor_from_name(Some("pointer"));
@@ -229,7 +286,20 @@ impl PlanRail {
             on_pick_plan: RefCell::new(None),
             on_mode_changed: RefCell::new(None),
             on_width_changed: RefCell::new(None),
+            zoom_button,
+            strip_zoom,
+            on_zoom: RefCell::new(None),
         });
+        for button in [&rail.zoom_button, &rail.strip_zoom] {
+            let weak = Rc::downgrade(&rail);
+            button.connect_clicked(move |_| {
+                let Some(rail) = weak.upgrade() else { return };
+                let callback = rail.on_zoom.borrow();
+                if let Some(f) = callback.as_ref() {
+                    f();
+                }
+            });
+        }
 
         let set_mode = |button: &gtk::Button, mode: RailState| {
             let weak = Rc::downgrade(&rail);
@@ -362,6 +432,17 @@ impl PlanRail {
         *self.on_pick_plan.borrow_mut() = Some(Box::new(f));
     }
 
+    pub fn connect_zoom(&self, f: impl Fn() + 'static) {
+        *self.on_zoom.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// The "Subagents" button shows only where it leads somewhere: at Z0
+    /// with subagents to show.
+    pub fn set_zoom_button_visible(&self, visible: bool) {
+        self.zoom_button.set_visible(visible);
+        self.strip_zoom.set_visible(visible);
+    }
+
     pub fn connect_mode_changed(&self, f: impl Fn(RailState) + 'static) {
         *self.on_mode_changed.borrow_mut() = Some(Box::new(f));
     }
@@ -462,20 +543,34 @@ impl PlanRail {
         self.title.set_label(&title);
         self.title.set_tooltip_text(Some(&title));
 
-        let mut add_row = |text: String, depth: usize, run: Option<String>, dim: bool| {
-            let label = gtk::Label::new(Some(&text));
-            label.set_xalign(0.0);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            label.set_margin_start(6 + 12 * depth as i32);
-            if dim {
-                label.add_css_class("dim-label");
+        let mut add_row = |row: RailRow| {
+            let text = gtk::Label::new(Some(&row.text));
+            text.set_xalign(0.0);
+            text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            match row.css {
+                Some(css) => text.add_css_class(css),
+                None => text.add_css_class("dim-label"),
             }
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&label));
-            row.set_activatable(run.is_some());
-            row.set_tooltip_text(Some(&text));
-            self.list.append(&row);
-            row_runs.push(run);
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.set_margin_start(6 + 12 * row.depth as i32);
+            content.append(&text);
+            let mut tip = row.text.clone();
+            if let Some(summary) = row.summary.as_deref() {
+                let line = gtk::Label::new(Some(summary));
+                line.set_xalign(0.0);
+                line.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                line.add_css_class("dim-label");
+                line.add_css_class("limux-plan-rail-summary");
+                line.set_margin_start(16);
+                content.append(&line);
+                tip = format!("{tip}\n{summary}");
+            }
+            let list_row = gtk::ListBoxRow::new();
+            list_row.set_child(Some(&content));
+            list_row.set_activatable(row.run.is_some());
+            list_row.set_tooltip_text(Some(&tip));
+            self.list.append(&list_row);
+            row_runs.push(row.run);
         };
 
         fn walk(
@@ -483,7 +578,7 @@ impl PlanRail {
             depth: usize,
             hide_done: bool,
             state: &DipState,
-            add: &mut dyn FnMut(String, usize, Option<String>, bool),
+            add: &mut dyn FnMut(RailRow),
         ) {
             for node in nodes {
                 if hide_done && !node.has_open_work() {
@@ -495,12 +590,13 @@ impl PlanRail {
                     .and_then(|id| state.run(id))
                     .map(|run| format!("  {}", run.status.glyph()))
                     .unwrap_or_default();
-                add(
-                    format!("{} {}{}", node_glyph(node.status), node.label, run_glyph),
+                add(RailRow {
+                    text: format!("{} {}{}", node_glyph(node.status), node.label, run_glyph),
                     depth,
-                    node.run.clone(),
-                    node.status == NodeStatus::Done,
-                );
+                    run: node.run.clone(),
+                    css: node_css(node.status),
+                    summary: None,
+                });
                 walk(&node.children, depth + 1, hide_done, state, add);
             }
         }
@@ -508,21 +604,29 @@ impl PlanRail {
             walk(&plan.nodes, 0, hide_done, state, &mut add_row);
         }
 
-        // The same runs as the /dip pane: running, and finished for a minute.
+        // The same runs as the /dip pane: running, and finished for a
+        // minute; each in its status colour with its summary line.
         let recent = state.recent_runs();
         let runs: Vec<_> = recent
             .iter()
             .filter(|run| !hide_done || run.status.is_running())
             .collect();
         if !runs.is_empty() {
-            add_row("Subagents".to_string(), 0, None, true);
+            add_row(RailRow {
+                text: "Subagents".to_string(),
+                depth: 0,
+                run: None,
+                css: None,
+                summary: None,
+            });
             for run in runs {
-                add_row(
-                    format!("{} {}", run.status.glyph(), run.name),
-                    1 + state.depth(run),
-                    Some(run.id.clone()),
-                    !run.status.is_running(),
-                );
+                add_row(RailRow {
+                    text: format!("{} {}", run.status.glyph(), run.name),
+                    depth: 1 + state.depth(run),
+                    run: Some(run.id.clone()),
+                    css: Some(status_css(run.status)),
+                    summary: summary_of(run),
+                });
             }
         }
         *self.row_runs.borrow_mut() = row_runs;
@@ -623,6 +727,25 @@ mod tests {
             ]
         );
         assert!(strip_stats(&[]).is_empty());
+    }
+
+    #[test]
+    fn nodes_take_the_colours_of_the_dip_pane() {
+        assert_eq!(node_css(NodeStatus::Active), Some("limux-zoom-st-running"));
+        assert_eq!(node_css(NodeStatus::Done), Some("limux-zoom-st-done"));
+        assert_eq!(node_css(NodeStatus::Failed), Some("limux-zoom-st-failed"));
+        assert_eq!(node_css(NodeStatus::Blocked), Some("limux-zoom-st-limit"));
+        assert_eq!(node_css(NodeStatus::Todo), None);
+    }
+
+    #[test]
+    fn a_summary_is_one_trimmed_line_or_none() {
+        let mut with = run("a", "running");
+        with.summary = Some("  next: 2/5\n  writing   rows ".to_string());
+        assert_eq!(summary_of(&with).as_deref(), Some("next: 2/5 writing rows"));
+        with.summary = Some("  ".to_string());
+        assert_eq!(summary_of(&with), None);
+        assert_eq!(summary_of(&run("b", "done")), None);
     }
 
     #[test]

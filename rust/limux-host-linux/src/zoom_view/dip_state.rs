@@ -21,7 +21,8 @@
 //!     "kind": "codex", "parent": null, "status": "running",
 //!     "startedMs": 1763829990000, "endedMs": null,
 //!     "follow": ["exec-tmux.sh", "follow", "/…/p2a-stream.jsonl"],
-//!     "chat": ["exec-tmux.sh", "chat", "/…/p2a-stream.jsonl", "--launch", "17"] } ]
+//!     "chat": ["exec-tmux.sh", "chat", "/…/p2a-stream.jsonl", "--launch", "17"],
+//!     "summary": "next: 3/7 Rail widget · writing the list rows" } ]
 //! }
 //! ```
 //!
@@ -139,6 +140,10 @@ pub struct Run {
     /// The argv of the view that can take the run over.
     #[serde(default)]
     pub chat: Option<Vec<String>>,
+    /// The dim line under the run in the /dip pane: a running run's
+    /// activity, a finished run's final message. Optional (older mods).
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl Run {
@@ -414,6 +419,7 @@ mod tests {
         { "id": "a", "name": "codex · p1a", "status": "done",
           "follow": ["exec-tmux.sh", "follow", "/s/a.jsonl"] },
         { "id": "b", "name": "codex · p2b", "status": "running",
+          "summary": "next: 2/5 Rail · writing rows",
           "follow": ["exec-tmux.sh", "follow", "/s/b.jsonl"],
           "chat": ["exec-tmux.sh", "chat", "/s/b.jsonl", "--launch", "7"] },
         { "id": "c", "name": "runner · clippy", "parent": "b", "status": "taken-over",
@@ -431,6 +437,11 @@ mod tests {
         assert_eq!(state.runs[1].chat.as_ref().unwrap()[4], "7");
         assert_eq!(state.runs[2].status, RunStatus::TakenOver);
         assert_eq!(state.runs[3].status, RunStatus::Unknown);
+        assert_eq!(
+            state.runs[1].summary.as_deref(),
+            Some("next: 2/5 Rail · writing rows")
+        );
+        assert_eq!(state.runs[0].summary, None);
     }
 
     #[test]

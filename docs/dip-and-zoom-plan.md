@@ -16,17 +16,17 @@ fewer rows. A limux-native plan rail shows the plan tree next to them.
 | Plan rail | On every zoom level. Open (240 px by default; drag its left edge between 180 and 640 px, saved as `plan_rail_width`), collapsed (44 px strip with one glyph and count per run status; the plan title and active task are in its tooltip; a click anywhere on the strip opens the rail) or closed. The rail lists the same runs as the /dip pane: every running run, and per group (subagents, shells) the eight latest finished runs that ended less than one minute ago (30 minutes for a run at its limit). A closed rail leaves a "Show plan" button in the header of the session pane. |
 | Splits | Hidden on zoom-out; they come back at Z0. |
 | Zoom-in | One level in; from Z1 back to Z0. The main terminal gets the keyboard focus; a selected tile does not matter. |
-| Double-click on a tile | Returns to Z0 and opens the run as a new tab in the same pane. The tab runs the run's `chat` argv (or `follow` when `chat` is null). |
+| Double-click on a tile | Opens the run as a new tab in the same pane; the zoom level stays. The tab runs the run's `chat` argv (or `follow` when `chat` is null). |
 | Takeover | Read-only until Enter on a typed line; Esc returns to read-only. This is `exec-tmux.sh chat` behaviour in the mod, not limux. |
 | Overflow | The tile area scrolls and shows "N more subagents below · scroll". |
 | Data source | Limux reads only the mod's state file. It never parses plans. |
 | Scope | Only the runs of the session under the pointer. |
 | Tiles | The same runs as the rail and the /dip pane: running runs, and finished runs for one minute (30 minutes at a usage limit) as dimmed tiles while `show_finished` is on. The tile terminals use a font 2 points smaller than the terminal font (6 points at least). |
 | No plan and no runs | The rail hides itself. |
-| Rail v1 | Tree, "Hide done", plan picker. A click on a run selects its tile. |
-| Top bar | Buttons Z0–Z3 go straight to a level. The selected level has an amber background. A deeper level zooms out of the focused pane. The tooltip names the shortcuts and Ctrl+wheel. |
+| Rail v1 | Tree, "Hide done", plan picker. A click on a run selects its tile. Rows use the colours of the /dip pane (running and active yellow, done green, failed red, limit and blocked magenta, stopped grey, taken over cyan; to do dim), and each run has the pane's summary line (`summary` in the state file) below it. At Z0, with subagents, a "Subagents" button (a grid icon on the strip) zooms out to Z1. |
+| Top bar | Buttons Z0–Z3 go straight to a level. The selected level has an amber background. The zoom CSS loads one above user priority, so a theme's `~/.config/gtk-4.0/gtk.css` cannot hide it. A deeper level zooms out of the focused pane. The tooltip names the shortcuts and Ctrl+wheel. |
 | Top bar filters | "Hide done" hides finished subagents and shells; "Hide shells" hides background shells, so only subagents show. The filter is per workspace and applies to the tiles and the rail. A hidden tile stops its terminal; it starts again when the filter turns off. |
-| Cards | The main terminal and each tile are rounded cards with a title: status glyph, name, detail (model, or tab · plan · cols × rows) and the elapsed time. Tiles have no other controls. The pane header hides while zoomed and comes back at Z0. |
+| Cards | The main terminal and each tile are rounded cards with a title: status glyph, name, detail (model, or tab · plan · cols × rows) and the elapsed time. Tiles have no other controls. The pane header hides while zoomed, unless the pane has more than one tab, and comes back at Z0. |
 | Shortcuts | Ctrl+Alt+Z zooms out of the focused pane, Ctrl+Alt+Shift+Z zooms in (like Ctrl+wheel). Keys `zoom_view_out` and `zoom_view_in` in `shortcuts.json`. Ctrl+Alt+Shift+Up/Down are GNOME's move-to-workspace keys, so the shortcuts do not use them. |
 
 ## Settings (`settings.json`)

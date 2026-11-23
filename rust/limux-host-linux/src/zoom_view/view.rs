@@ -2,7 +2,7 @@
 //! the other splits away and shows the session's subagents as live tiles
 //! beside it; the plan rail is on every level. Ctrl+wheel up steps back
 //! to Z0 and focuses the main terminal; a double-click on a tile opens
-//! that run as a new tab in the same pane.
+//! that run as a new tab in the same pane, at the same zoom level.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -230,18 +230,16 @@ fn install_css() {
          .limux-zoom-card-name { font-weight: 600; }\n\
          .limux-zoom-card-end { font-family: monospace; }\n\
          .limux-zoom-card-plan { padding: 0 8px; min-height: 20px; font-size: 0.9em; }\n\
-         .limux-zoom-st-running { color: #6aa6ff; }\n\
+         .limux-plan-rail-summary { font-size: 0.85em; }\n\
+         .limux-zoom-st-running { color: #e5c07b; }\n\
          .limux-zoom-st-done { color: #6fcf8f; }\n\
          .limux-zoom-st-failed { color: #ff8a8a; }\n\
-         .limux-zoom-st-limit { color: #f0b45e; }\n\
-         .limux-zoom-st-taken-over { color: #c39bff; }\n\
+         .limux-zoom-st-limit { color: #d68ae6; }\n\
+         .limux-zoom-st-stopped { color: alpha(currentColor, 0.55); }\n\
+         .limux-zoom-st-taken-over { color: #56c8d8; }\n\
          .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n",
     );
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    gtk::style_context_add_provider_for_display(&display, &provider, super::CSS_PRIORITY);
 }
 
 impl ZoomView {
@@ -363,6 +361,12 @@ impl ZoomView {
         }
         {
             let weak = Rc::downgrade(&view);
+            view.rail.connect_zoom(move || {
+                if let Some(view) = weak.upgrade() {
+                    view.show_subagents();
+                }
+            });
+            let weak = Rc::downgrade(&view);
             view.rail.connect_pick_plan(move |plan| {
                 if let Some(view) = weak.upgrade() {
                     view.write_plan_choice(plan);
@@ -456,6 +460,8 @@ impl ZoomView {
 
     fn notify_status(&self) {
         let status = self.status();
+        self.rail
+            .set_zoom_button_visible(!status.level.is_zoomed() && status.can_zoom);
         if self.last_status.replace(Some(status)) == Some(status) {
             return;
         }
@@ -848,6 +854,7 @@ impl ZoomView {
         let Some(session) = self.session.borrow().clone() else {
             return;
         };
+        Self::sync_pane_header(&session.pane);
         let summary = pane::active_surface_summary(&session.pane);
         let name = summary
             .as_ref()
@@ -934,8 +941,7 @@ impl ZoomView {
             return false;
         }
         self.level.set(ZoomLevel::Z1);
-        // The card title replaces the pane header while zoomed.
-        pane::set_pane_header_visible(pane, false);
+        Self::sync_pane_header(pane);
         self.sync_tiles();
         self.relayout();
         self.notify_status();
@@ -984,6 +990,16 @@ impl ZoomView {
         true
     }
 
+    /// The rail's "Subagents" button: zoom out of the session's pane to
+    /// Z1, with the keyboard focus on its terminal.
+    fn show_subagents(self: &Rc<Self>) {
+        let pane = self.session.borrow().as_ref().map(|s| s.pane.clone());
+        if self.level.get().is_zoomed() || !self.zoom_out(pane.as_ref()) {
+            return;
+        }
+        self.focus_main();
+    }
+
     /// The keyboard focus to the session's terminal.
     fn focus_main(&self) {
         let Some(session) = self.session.borrow().clone() else {
@@ -994,8 +1010,8 @@ impl ZoomView {
         }
     }
 
-    /// A double-click on a tile: back to Z0, and the run opens as a new
-    /// tab in the session's pane.
+    /// A double-click on a tile: the run opens as a new tab in the
+    /// session's pane, and the zoom level stays.
     fn open_in_tab(self: &Rc<Self>, run_id: &str) {
         let Some(run) = self
             .current_state()
@@ -1003,11 +1019,21 @@ impl ZoomView {
         else {
             return;
         };
+        // The zoom level stays: the tab opens in the main terminal's pane,
+        // and the pane header comes back so the tabs can be switched.
         let session = self.session.borrow().clone();
-        self.leave();
         if let Some(session) = session {
             self.promote(&session, &run);
+            if self.level.get().is_zoomed() {
+                Self::sync_pane_header(&session.pane);
+            }
         }
+    }
+
+    /// While zoomed, the card title replaces the pane header. A pane with
+    /// more than one tab keeps its header, so its tabs stay reachable.
+    fn sync_pane_header(pane: &gtk::Widget) {
+        pane::set_pane_header_visible(pane, pane::tab_count_in_pane(pane) > 1);
     }
 
     fn set_level(&self, level: ZoomLevel) {
