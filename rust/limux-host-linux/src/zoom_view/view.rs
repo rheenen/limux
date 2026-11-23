@@ -17,7 +17,7 @@ use gtk4 as gtk;
 use super::config::{RailState, ZoomLayout, ZoomViewConfig};
 use super::dip_state::{self, DipState, Run, RunFilter, RunStatus};
 use super::geometry::{self, Frame, ZoomLevel};
-use super::rail::PlanRail;
+use super::rail::{HandleSide, PlanRail};
 use crate::app_config::AppConfig;
 use crate::pane;
 use crate::split_tree::SplitTreeContainer;
@@ -1162,6 +1162,8 @@ impl ZoomView {
             parent.remove(&self.rail.root);
         }
         container.rail_slot().append(&self.rail.root);
+        // Beside the splits the rail is the rightmost column.
+        self.rail.set_handle_side(HandleSide::Start);
     }
 
     /// Back to Z0: the splits return. The tiles keep their surfaces; they
@@ -1258,6 +1260,14 @@ impl ZoomView {
         let tile_px_height = (f64::from(placement.tile_rows) * cell_height).round() as i32;
         let side_by_side = matches!(config.layout, ZoomLayout::Focus | ZoomLayout::Grid);
         self.main_handle.set_visible(side_by_side);
+        // Side by side, the tiles are right of the rail: its handle goes
+        // between the rail and the tiles, not next to the main handle.
+        // Otherwise the rail is the rightmost column.
+        self.rail.set_handle_side(if side_by_side {
+            HandleSide::End
+        } else {
+            HandleSide::Start
+        });
         if side_by_side {
             place(&self.frame, &self.main_slot, 0, 0, 1, 1);
             place(&self.frame, &self.main_handle, 1, 0, 1, 1);

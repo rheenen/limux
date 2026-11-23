@@ -15,18 +15,34 @@ use super::dip_state::{DipState, NodeStatus, PlanNode, Run, RunStatus};
 use super::view::status_css;
 
 pub const COLLAPSED_WIDTH: i32 = 44;
-/// The drag handle on the rail's left edge; part of the open width.
+/// The drag handle on one edge of the open rail; part of the open width.
 const HANDLE_WIDTH: i32 = 6;
+
+/// The edge of the rail that has the drag handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandleSide {
+    /// The left edge: the rail is the rightmost column (beside the splits,
+    /// or right of the main terminal and the tiles).
+    Start,
+    /// The right edge: the subagent tiles are right of the rail, so the
+    /// handle sits between the rail and the tiles.
+    End,
+}
 
 type RunCallback = dyn Fn(&str);
 type ModeCallback = dyn Fn(RailState);
 /// The new open width, and whether the drag ended (then it is saved).
 type WidthCallback = dyn Fn(i32, bool);
 
-/// The open width after a drag of `dx` pixels from `start`. The rail sits
-/// at the right, so a drag to the left (negative dx) widens it.
-pub fn dragged_width(start: i32, dx: f64) -> i32 {
-    clamp_width(start - dx.round() as i32)
+/// The open width after a drag of `dx` pixels from `start`. A drag away
+/// from the rail widens it: to the left for a handle on the left edge, to
+/// the right for a handle on the right edge.
+pub fn dragged_width(side: HandleSide, start: i32, dx: f64) -> i32 {
+    let dx = dx.round() as i32;
+    clamp_width(match side {
+        HandleSide::Start => start - dx,
+        HandleSide::End => start + dx,
+    })
 }
 
 pub fn clamp_width(width: i32) -> i32 {
@@ -67,6 +83,7 @@ fn status_word(status: RunStatus) -> &'static str {
 pub struct PlanRail {
     pub root: gtk::Box,
     handle: gtk::Box,
+    handle_side: Cell<HandleSide>,
     open_panel: gtk::Box,
     open_width: Cell<i32>,
     strip: gtk::Box,
@@ -184,7 +201,8 @@ impl PlanRail {
         // terminals.
         root.set_hexpand(false);
 
-        // Drag handle: the open rail's left edge.
+        // Drag handle: the open rail's left edge (`set_handle_side` moves
+        // it to the right edge).
         let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
         handle.add_css_class("limux-plan-rail-handle");
         handle.set_size_request(HANDLE_WIDTH, -1);
@@ -283,6 +301,7 @@ impl PlanRail {
         let rail = Rc::new(Self {
             root,
             handle,
+            handle_side: Cell::new(HandleSide::Start),
             open_panel,
             open_width: Cell::new(open_width),
             strip,
@@ -395,21 +414,21 @@ impl PlanRail {
                     begin.set((rail.open_width.get(), x));
                 }
             });
-            let moved = |drag: &gtk::GestureDrag, start: (i32, f64)| {
+            let moved = |rail: &Self, drag: &gtk::GestureDrag, start: (i32, f64)| {
                 let x = super::drag_x_in_window(drag).unwrap_or(start.1);
-                dragged_width(start.0, x - start.1)
+                dragged_width(rail.handle_side.get(), start.0, x - start.1)
             };
             let weak = Rc::downgrade(&rail);
             let update = start.clone();
             drag.connect_drag_update(move |drag, _, _| {
                 if let Some(rail) = weak.upgrade() {
-                    rail.resize(moved(drag, update.get()), false);
+                    rail.resize(moved(&rail, drag, update.get()), false);
                 }
             });
             let weak = Rc::downgrade(&rail);
             drag.connect_drag_end(move |drag, _, _| {
                 if let Some(rail) = weak.upgrade() {
-                    rail.resize(moved(drag, start.get()), true);
+                    rail.resize(moved(&rail, drag, start.get()), true);
                 }
             });
             rail.handle.add_controller(drag);
@@ -422,6 +441,18 @@ impl PlanRail {
     /// ends (`done` true).
     pub fn connect_width_changed(&self, f: impl Fn(i32, bool) + 'static) {
         *self.on_width_changed.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Put the drag handle on the left or the right edge of the rail.
+    pub fn set_handle_side(&self, side: HandleSide) {
+        if self.handle_side.replace(side) == side {
+            return;
+        }
+        let after: Option<&gtk::Widget> = match side {
+            HandleSide::Start => None,
+            HandleSide::End => Some(self.strip.upcast_ref()),
+        };
+        self.root.reorder_child_after(&self.handle, after);
     }
 
     /// The width of the open rail, the handle included.
@@ -804,9 +835,19 @@ mod tests {
 
     #[test]
     fn a_drag_to_the_left_widens_the_rail_within_its_limits() {
-        assert_eq!(dragged_width(240, -60.0), 300);
-        assert_eq!(dragged_width(240, 20.4), 220);
-        assert_eq!(dragged_width(240, 500.0), MIN_RAIL_WIDTH as i32);
-        assert_eq!(dragged_width(240, -2000.0), MAX_RAIL_WIDTH as i32);
+        let side = HandleSide::Start;
+        assert_eq!(dragged_width(side, 240, -60.0), 300);
+        assert_eq!(dragged_width(side, 240, 20.4), 220);
+        assert_eq!(dragged_width(side, 240, 500.0), MIN_RAIL_WIDTH as i32);
+        assert_eq!(dragged_width(side, 240, -2000.0), MAX_RAIL_WIDTH as i32);
+    }
+
+    #[test]
+    fn a_drag_to_the_right_widens_a_rail_with_its_handle_on_the_right() {
+        let side = HandleSide::End;
+        assert_eq!(dragged_width(side, 240, 60.0), 300);
+        assert_eq!(dragged_width(side, 240, -20.4), 220);
+        assert_eq!(dragged_width(side, 240, -500.0), MIN_RAIL_WIDTH as i32);
+        assert_eq!(dragged_width(side, 240, 2000.0), MAX_RAIL_WIDTH as i32);
     }
 }
