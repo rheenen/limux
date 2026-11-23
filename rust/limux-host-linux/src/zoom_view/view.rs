@@ -240,6 +240,7 @@ fn install_css() {
          .limux-zoom-card-end { font-family: monospace; }\n\
          .limux-zoom-card-plan { padding: 0 8px; min-height: 20px; font-size: 0.9em; }\n\
          .limux-plan-rail-summary { font-size: 0.85em; }\n\
+         .limux-plan-rail-list > row { min-height: 0; padding-top: 1px; padding-bottom: 1px; margin-top: 0; margin-bottom: 0; }\n\
          .limux-zoom-st-running { color: #e5c07b; }\n\
          .limux-zoom-st-done { color: #6fcf8f; }\n\
          .limux-zoom-st-failed { color: #ff8a8a; }\n\
@@ -458,9 +459,15 @@ impl ZoomView {
         let level = self.level.get();
         ZoomStatus {
             level,
-            can_zoom: level.is_zoomed() || !self.tile_runs().is_empty(),
+            can_zoom: super::bar::can_zoom(level, self.current_state().as_ref()),
             filter: self.filter.get(),
         }
+    }
+
+    /// The session has a plan or runs: the rail shows them, and the zoom
+    /// levels open even before a subagent starts.
+    fn has_plan(&self) -> bool {
+        super::bar::can_zoom(ZoomLevel::Z0, self.current_state().as_ref())
     }
 
     /// The top-bar filters changed: tiles and rail follow them.
@@ -1028,7 +1035,7 @@ impl ZoomView {
         };
         self.set_session(Some(session));
         self.reload();
-        if self.tile_runs().is_empty() {
+        if !self.has_plan() {
             return false;
         }
         // Move the rail into the frame, then show the frame.

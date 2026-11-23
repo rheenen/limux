@@ -2709,6 +2709,21 @@ fn install_zoom_controls(window: &adw::ApplicationWindow, state: &State) {
         });
         window.add_action(&action);
     }
+    // Every workspace switch shows another stack child: the bar follows
+    // it, also on the paths (restore, new or moved workspace) that set
+    // the active workspace without a sync.
+    {
+        let stack = state.borrow().stack.clone();
+        let weak = Rc::downgrade(state);
+        stack.connect_visible_child_notify(move |_| {
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(state) = weak.upgrade() {
+                    sync_zoom_bar(&state);
+                }
+            });
+        });
+    }
     sync_zoom_bar(state);
 
     // A scroll event carries no position on every backend, so the pointer

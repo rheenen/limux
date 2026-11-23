@@ -191,7 +191,10 @@ impl PlanRail {
         title.add_css_class("heading");
         let collapse = flat_button("go-next-symbolic", "Collapse the plan");
         let close = flat_button("window-close-symbolic", "Close the plan");
+        let hide_done = gtk::CheckButton::with_label("Hide done");
+        hide_done.set_tooltip_text(Some("Hide the finished phases and runs"));
         header.append(&title);
+        header.append(&hide_done);
         header.append(&collapse);
         header.append(&close);
 
@@ -201,9 +204,6 @@ impl PlanRail {
         picker.set_margin_end(8);
         picker.set_tooltip_text(Some("Show another plan"));
         picker.set_visible(false);
-
-        let hide_done = gtk::CheckButton::with_label("Hide done");
-        hide_done.set_margin_start(8);
 
         let zoom_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         zoom_content.set_halign(gtk::Align::Center);
@@ -222,6 +222,7 @@ impl PlanRail {
         list.set_selection_mode(gtk::SelectionMode::None);
         list.set_activate_on_single_click(true);
         list.add_css_class("navigation-sidebar");
+        list.add_css_class("limux-plan-rail-list");
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -231,7 +232,6 @@ impl PlanRail {
         open_panel.append(&header);
         open_panel.append(&zoom_button);
         open_panel.append(&picker);
-        open_panel.append(&hide_done);
         open_panel.append(&scroller);
 
         // Collapsed strip: expand, close, then one count per run status

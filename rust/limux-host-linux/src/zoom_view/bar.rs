@@ -4,6 +4,7 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
 
+use super::dip_state::DipState;
 use super::geometry::ZoomLevel;
 use super::view::ZoomStatus;
 
@@ -67,6 +68,12 @@ pub fn level_hint(
 
 /// A level button is usable when it leads somewhere: Z0 only while
 /// zoomed, a deeper level only when there are subagents to show.
+/// The zoom levels open when the rail has a plan or runs to show, also
+/// before a subagent starts; a zoomed view can always step back.
+pub fn can_zoom(level: ZoomLevel, state: Option<&DipState>) -> bool {
+    level.is_zoomed() || state.is_some_and(DipState::has_content)
+}
+
 pub fn level_enabled(level: ZoomLevel, status: ZoomStatus) -> bool {
     if level.is_zoomed() {
         status.can_zoom
@@ -126,9 +133,17 @@ fn filter_button(label: &str, icon: &str, action: &str) -> gtk::Button {
     button.add_css_class("limux-zoom-filter");
     button.set_focus_on_click(false);
     button.set_valign(gtk::Align::Center);
-    button.set_action_name(Some(&format!("win.{action}")));
+    let action = format!("win.{action}");
+    button.connect_clicked(move |button| {
+        let _ = button.activate_action(&action, None);
+    });
     button
 }
+
+// The buttons start their actions from `clicked`, not through
+// `set_action_name`: GTK's action helper sets the sensitivity of a linked
+// button itself (when the action appears or the bar moves to another
+// parent) and then overwrites what `ZoomBar::sync` set.
 
 impl ZoomBar {
     /// Each button starts `ACTION` with the index of its level.
@@ -150,8 +165,10 @@ impl ZoomBar {
                 button.add_css_class("limux-top-bar-btn");
                 button.add_css_class("limux-zoom-level");
                 button.set_focus_on_click(false);
-                button.set_action_name(Some(ACTION));
-                button.set_action_target_value(Some(&(index as u32).to_variant()));
+                let target = (index as u32).to_variant();
+                button.connect_clicked(move |button| {
+                    let _ = button.activate_action(ACTION, Some(&target));
+                });
                 levels.append(&button);
                 (level, button)
             })
@@ -244,6 +261,22 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_without_runs_opens_the_zoom_levels() {
+        let plan_only = super::super::dip_state::parse(
+            r#"{ "version": 1, "updatedMs": 0,
+                 "plan": { "id": "P", "title": "Plan", "nodes": [
+                   { "id": "p0", "label": "Phase 0", "status": "todo" } ] } }"#,
+        )
+        .unwrap();
+        assert!(plan_only.runs.is_empty());
+        assert!(can_zoom(ZoomLevel::Z0, Some(&plan_only)));
+        let empty = super::super::dip_state::parse(r#"{ "version": 1, "updatedMs": 0 }"#).unwrap();
+        assert!(!can_zoom(ZoomLevel::Z0, Some(&empty)));
+        assert!(!can_zoom(ZoomLevel::Z0, None));
+        assert!(can_zoom(ZoomLevel::Z1, None));
+    }
 
     fn status(level: ZoomLevel, can_zoom: bool) -> ZoomStatus {
         ZoomStatus {
