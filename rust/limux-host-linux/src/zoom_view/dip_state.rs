@@ -26,7 +26,7 @@
 //! ```
 //!
 //! `chat` is null when the run cannot be taken over (a native subagent,
-//! or a host without memcap scopes); its promoted tab then only follows.
+//! or a host without memcap scopes). Limux does not run `chat` itself.
 //!
 //! The plan picker writes its choice back to
 //! `<LIMUX_SURFACE_ID>.select.json` (`{"plan": "<id>"}`) next to the state
@@ -273,16 +273,17 @@ impl DipState {
         copy
     }
 
-    /// The runs that get a tile: running first, then the finished ones
-    /// when `show_finished` is on. The mod's order is kept inside each group.
+    /// The runs that get a tile: the runs of `recent_runs` (the /dip
+    /// pane's rule), running first, then the finished ones when
+    /// `show_finished` is on. The mod's order is kept inside each group.
     pub fn tile_runs(&self, show_finished: bool) -> Vec<&Run> {
-        let running = self.runs.iter().filter(|r| r.status.is_running());
-        let finished = self
-            .runs
+        let recent = self.recent_runs();
+        let running = recent.iter().filter(|r| r.status.is_running());
+        let finished = recent
             .iter()
             .filter(|r| !r.status.is_running())
             .filter(|_| show_finished);
-        running.chain(finished).collect()
+        running.chain(finished).copied().collect()
     }
 
     /// The runs that the /dip pane lists, so the rail lists the same:
@@ -487,6 +488,23 @@ mod tests {
         let ids = |v: Vec<&Run>| v.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(state.tile_runs(true)), ["b", "a", "c", "d"]);
         assert_eq!(ids(state.tile_runs(false)), ["b"]);
+    }
+
+    #[test]
+    fn tiles_drop_the_runs_that_the_dip_pane_no_longer_lists() {
+        let mut state = parse(SAMPLE).unwrap();
+        state.updated_ms = 10_000_000;
+        state.runs = vec![
+            timed("old", "done", Some(1_000), None),
+            timed("fresh", "failed", Some(9_990_000), None),
+            timed("live", "running", None, None),
+        ];
+        let ids: Vec<&str> = state
+            .tile_runs(true)
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["live", "fresh"]);
     }
 
     #[test]

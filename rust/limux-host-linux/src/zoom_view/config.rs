@@ -112,7 +112,7 @@ pub struct ZoomViewConfig {
     pub plan_rail_width: u32,
     /// Off: Ctrl+wheel goes to the terminal, as before.
     pub ctrl_wheel: bool,
-    /// Finished runs stay as dimmed tiles until the session ends.
+    /// Recently finished runs (the /dip pane's rule) stay as dimmed tiles.
     pub show_finished: bool,
 }
 

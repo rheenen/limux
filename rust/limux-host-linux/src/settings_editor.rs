@@ -307,7 +307,7 @@ fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
     finished.set_active(current.show_finished);
     row(
         "Show finished subagents",
-        "Finished runs stay as dimmed tiles below the running ones until the session ends.",
+        "Runs that finished in the last minute stay as dimmed tiles below the running ones.",
         finished.upcast_ref(),
     );
 

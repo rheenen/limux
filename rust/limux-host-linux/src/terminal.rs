@@ -10,7 +10,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,13 @@ unsafe impl Sync for GhosttyState {}
 static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 static CURRENT_COLOR_SCHEME: AtomicI32 = AtomicI32::new(GHOSTTY_COLOR_SCHEME_LIGHT);
 static CURRENT_SCROLLBAR_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Goes up each time a font change reaches the open terminals, so a view
+/// that gives its terminals their own size can apply it again.
+static FONT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn font_generation() -> u64 {
+    FONT_GENERATION.load(Ordering::Relaxed)
+}
 static CURRENT_AUTOSTART_SHELL_KIND: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(1);
 static CURRENT_TERMINAL_FONT: LazyLock<Mutex<crate::terminal_font::TerminalFontConfig>> =
@@ -978,6 +985,7 @@ pub fn apply_terminal_font_config(
     if reset_zoom {
         broadcast_binding_action("reset_font_size");
     }
+    FONT_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let surfaces: Vec<(ghostty_surface_t, gtk::GLArea)> = SURFACE_MAP.with(|map| {
         map.borrow()

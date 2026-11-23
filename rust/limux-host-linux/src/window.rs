@@ -29,7 +29,7 @@ use crate::shortcut_config::{
 use crate::split_tree::{self, SplitTreeContainer};
 use crate::workspace_color::{self, WorkspaceColor};
 use crate::workspace_group::{Placement, RowRef, SidebarLayout};
-use crate::zoom_view::view::{self as zoom_view_widget, ZoomView};
+use crate::zoom_view::view::ZoomView;
 
 mod gui_hooks;
 mod navigation_notifications;
@@ -2807,12 +2807,12 @@ fn zoom_shortcut(state: &State, out: bool) -> bool {
     if out {
         zoom.zoom_out_focused()
     } else {
-        zoom.zoom_in(None)
+        zoom.zoom_in()
     }
 }
 
 /// Ctrl+wheel over `picked`: down zooms out of the pane under the pointer,
-/// up zooms in toward the selected tile or the tile under the pointer.
+/// up zooms in one level and focuses the main terminal.
 fn zoom_scroll(state: &State, picked: &gtk::Widget, dy: f64) -> bool {
     let (enabled, zoom, container, root) = {
         let s = state.borrow();
@@ -2840,7 +2840,7 @@ fn zoom_scroll(state: &State, picked: &gtk::Widget, dy: f64) -> bool {
     if dy > 0.0 {
         zoom.zoom_out(pane.as_ref())
     } else {
-        zoom.zoom_in(zoom_view_widget::tile_run_at(picked))
+        zoom.zoom_in()
     }
 }
 

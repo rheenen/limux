@@ -1,7 +1,8 @@
 //! The zoom view of one workspace: Ctrl+wheel down on a terminal folds
 //! the other splits away and shows the session's subagents as live tiles
-//! beside it; the plan rail is on every level. Ctrl+wheel up steps back;
-//! at Z0 a selected tile opens as a new tab in the same pane.
+//! beside it; the plan rail is on every level. Ctrl+wheel up steps back
+//! to Z0 and focuses the main terminal; a double-click on a tile opens
+//! that run as a new tab in the same pane.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -150,8 +151,6 @@ pub struct ZoomView {
     loaded: RefCell<Option<LoadedState>>,
     tiles: RefCell<Vec<Tile>>,
     selected: RefCell<Option<String>>,
-    /// Promoted tab surface id -> the surface id of its parent session.
-    promoted: RefCell<HashMap<String, String>>,
     last_size: Cell<(i32, i32)>,
     tile_height: Cell<f64>,
     grid_columns: Cell<u32>,
@@ -162,6 +161,10 @@ pub struct ZoomView {
     /// The saved rail width this view last applied; another workspace's
     /// drag changes the setting, and the poll then follows it.
     applied_rail_width: Cell<u32>,
+    /// Promoted tab surface id -> the surface id of its parent session.
+    promoted: RefCell<HashMap<String, String>>,
+    /// The tile font size and the font generation it was applied for.
+    applied_tile_font: Cell<(f32, u64)>,
     filter: Cell<RunFilter>,
 }
 
@@ -200,18 +203,6 @@ fn place(
     layout_child.set_row(row);
     layout_child.set_column_span(width);
     layout_child.set_row_span(height);
-}
-
-/// The run id of the tile at or above `widget`, if any.
-pub fn tile_run_at(widget: &gtk::Widget) -> Option<String> {
-    let mut current = Some(widget.clone());
-    while let Some(widget) = current {
-        if let Some(id) = widget.widget_name().strip_prefix(TILE_NAME_PREFIX) {
-            return Some(id.to_string());
-        }
-        current = widget.parent();
-    }
-    None
 }
 
 fn install_css() {
@@ -341,7 +332,6 @@ impl ZoomView {
             loaded: RefCell::new(None),
             tiles: RefCell::default(),
             selected: RefCell::new(None),
-            promoted: RefCell::default(),
             last_size: Cell::new((0, 0)),
             tile_height: Cell::new(0.0),
             grid_columns: Cell::new(1),
@@ -349,6 +339,8 @@ impl ZoomView {
             on_change: RefCell::new(None),
             last_status: Cell::new(None),
             applied_rail_width: Cell::new(rail_width),
+            promoted: RefCell::default(),
+            applied_tile_font: Cell::new((0.0, 0)),
             filter: Cell::new(RunFilter::default()),
         });
 
@@ -500,6 +492,7 @@ impl ZoomView {
         if surface.kind != "terminal" {
             return None;
         }
+        // A promoted tab belongs to the session that started its run.
         let surface_id = self
             .promoted
             .borrow()
@@ -606,11 +599,14 @@ impl ZoomView {
         if self.level.get().is_zoomed() {
             self.sync_tiles();
             self.relayout();
+        } else {
+            self.prune_tiles(&self.tile_runs());
         }
     }
 
     fn poll(self: &Rc<Self>) {
         self.follow_saved_rail_width();
+        self.follow_tile_font();
         if !self.level.get().is_zoomed() {
             if let Some(pane) = self.focused_pane() {
                 let session = self.session_for_pane(&pane);
@@ -626,6 +622,28 @@ impl ZoomView {
             self.sync_titles();
         }
         self.notify_status();
+    }
+
+    /// The tile font size (two points below the terminal font) and the
+    /// current font generation.
+    fn tile_font(&self) -> (f32, u64) {
+        let default_size = terminal::base_ghostty_font_defaults().size;
+        let size = self.config.borrow().effective_font_size(default_size);
+        (geometry::tile_font_size(size), terminal::font_generation())
+    }
+
+    /// A font change in Settings resets every terminal to the new font
+    /// size; the tiles then get their smaller size again.
+    fn follow_tile_font(&self) {
+        let wanted = self.tile_font();
+        let applied = self.applied_tile_font.replace(wanted);
+        if applied == wanted || applied.1 == 0 && applied.0 == 0.0 {
+            return;
+        }
+        let action = format!("set_font_size:{}", wanted.0);
+        for tile in self.tiles.borrow().iter() {
+            tile.term.handle.perform_binding_action(&action);
+        }
     }
 
     fn follow_saved_rail_width(&self) {
@@ -719,7 +737,7 @@ impl ZoomView {
             None,
             TerminalOptions {
                 suppress_initial_focus: true,
-                saved_font_size: config.font_size,
+                saved_font_size: Some(self.tile_font().0),
                 startup_command: Some(command),
                 ..TerminalOptions::default()
             },
@@ -742,10 +760,13 @@ impl ZoomView {
         click.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         let run_id = run.id.clone();
-        click.connect_pressed(move |gesture, _, _, _| {
+        click.connect_pressed(move |gesture, n_press, _, _| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
             if let Some(view) = weak.upgrade() {
                 view.select(Some(run_id.clone()));
+                if n_press == 2 {
+                    view.open_in_tab(&run_id);
+                }
             }
         });
         frame.add_controller(click);
@@ -763,10 +784,11 @@ impl ZoomView {
     /// Make the tiles match the runs: new tiles for new runs, and the
     /// surfaces of removed runs end. A tile keeps its surface while its
     /// run stays, so its output is not lost on a state change.
-    fn sync_tiles(self: &Rc<Self>) {
-        let runs = self.tile_runs();
-        let mut tiles = self.tiles.borrow_mut();
-        tiles.retain(|tile| {
+    /// Stop the tiles whose run left the list (it finished more than a
+    /// minute ago, or a filter hides it): their terminal and its follow
+    /// process end, so a long session does not keep old terminals.
+    fn prune_tiles(&self, runs: &[Run]) {
+        self.tiles.borrow_mut().retain(|tile| {
             let keep = runs
                 .iter()
                 .any(|run| run.id == tile.run_id && run.follow == tile.follow);
@@ -776,6 +798,12 @@ impl ZoomView {
             }
             keep
         });
+    }
+
+    fn sync_tiles(self: &Rc<Self>) {
+        let runs = self.tile_runs();
+        self.prune_tiles(&runs);
+        let mut tiles = self.tiles.borrow_mut();
         let mut ordered = Vec::with_capacity(runs.len());
         for run in &runs {
             let index = tiles.iter().position(|tile| tile.run_id == run.id);
@@ -921,8 +949,8 @@ impl ZoomView {
         self.zoom_out(pane.as_ref())
     }
 
-    /// A top-bar level button: go straight to `target`. Z0 returns
-    /// without a promotion; a deeper level zooms out of the focused pane
+    /// A top-bar level button: go straight to `target`. Z0 returns to the
+    /// splits; a deeper level zooms out of the focused pane
     /// first. Returns false when there is nothing to zoom to.
     pub fn go_to(self: &Rc<Self>, target: ZoomLevel) -> bool {
         let level = self.level.get();
@@ -940,31 +968,46 @@ impl ZoomView {
         true
     }
 
-    /// Ctrl+wheel up. `pointer_run` is the tile under the pointer, if any.
-    /// From Z1 the view returns to Z0; the selected tile (or the one under
-    /// the pointer) then opens as a new tab in the session's pane.
-    pub fn zoom_in(self: &Rc<Self>, pointer_run: Option<String>) -> bool {
+    /// Ctrl+wheel up: one level in, from Z1 back to Z0. The selected tile
+    /// does not matter; the main terminal gets the keyboard focus.
+    pub fn zoom_in(self: &Rc<Self>) -> bool {
         let level = self.level.get();
         if !level.is_zoomed() {
             return false;
         }
         if level > ZoomLevel::Z1 {
-            if let Some(run) = pointer_run {
-                if self.selected.borrow().is_none() {
-                    self.select(Some(run));
-                }
-            }
             self.set_level(level.r#in());
-            return true;
+        } else {
+            self.leave();
         }
-        let target = self.selected.borrow().clone().or(pointer_run);
-        let run = target.and_then(|id| self.current_state()?.run(&id).cloned());
+        self.focus_main();
+        true
+    }
+
+    /// The keyboard focus to the session's terminal.
+    fn focus_main(&self) {
+        let Some(session) = self.session.borrow().clone() else {
+            return;
+        };
+        if let Some((_, handle)) = pane::terminal_handle_for_surface(&session.pane, None) {
+            handle.focus_surface();
+        }
+    }
+
+    /// A double-click on a tile: back to Z0, and the run opens as a new
+    /// tab in the session's pane.
+    fn open_in_tab(self: &Rc<Self>, run_id: &str) {
+        let Some(run) = self
+            .current_state()
+            .and_then(|state| state.run(run_id).cloned())
+        else {
+            return;
+        };
         let session = self.session.borrow().clone();
         self.leave();
-        if let (Some(run), Some(session)) = (run, session) {
+        if let Some(session) = session {
             self.promote(&session, &run);
         }
-        true
     }
 
     fn set_level(&self, level: ZoomLevel) {
@@ -1015,6 +1058,7 @@ impl ZoomView {
         self.notify_status();
     }
 
+    /// The tab runs the run's `chat` argv, or `follow` when `chat` is null.
     fn promote(&self, session: &Session, run: &Run) {
         let argv = run.chat.as_ref().unwrap_or(&run.follow);
         let Some(command) = dip_state::shell_command(argv) else {

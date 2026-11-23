@@ -204,6 +204,17 @@ pub fn place(layout: ZoomLayout, frame: Frame, level: ZoomLevel) -> Placement {
     }
 }
 
+/// The tile terminals use a font this many points smaller than the
+/// terminal font, so a tile shows more of a run.
+pub const TILE_FONT_STEP: f32 = 2.0;
+/// The tile font never gets smaller than this.
+pub const MIN_TILE_FONT_SIZE: f32 = 6.0;
+
+/// The font size of a tile terminal for the terminal font size `size`.
+pub fn tile_font_size(size: f32) -> f32 {
+    (size - TILE_FONT_STEP).max(MIN_TILE_FONT_SIZE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +298,12 @@ mod tests {
         );
         assert!(p.main_px < 1040.0);
         assert_eq!(p.grid_columns, 3);
+    }
+
+    #[test]
+    fn tile_font_is_two_points_smaller_with_a_floor() {
+        assert_eq!(tile_font_size(13.0), 11.0);
+        assert_eq!(tile_font_size(10.5), 8.5);
+        assert_eq!(tile_font_size(7.0), MIN_TILE_FONT_SIZE);
     }
 }

@@ -216,6 +216,16 @@ impl ZoomBar {
     }
 }
 
+/// Two classes per selector: the app CSS sets `.limux-top-bar-btn`
+/// (background none, dim text) at the same priority and loads again
+/// after a settings change, so a one-class rule here would lose to it.
+const ZOOM_BAR_CSS: &str = "\
+.limux-top-bar-btn.limux-zoom-level { min-width: 28px; padding: 0 6px; font-size: 0.85em; }\n\
+.limux-top-bar-btn.limux-zoom-level-active { background: alpha(#f0b45e, 0.35); color: @window_fg_color; font-weight: bold; }\n\
+.limux-top-bar-btn.limux-zoom-filter { padding: 0 8px; font-size: 0.85em; }\n\
+.limux-top-bar-btn.limux-zoom-filter-on { background: alpha(#6aa6ff, 0.3); color: @window_fg_color; }\n\
+.limux-top-bar-btn.limux-zoom-level:disabled, .limux-top-bar-btn.limux-zoom-filter:disabled { opacity: 0.35; }\n";
+
 fn install_css() {
     thread_local! {
         static INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -227,13 +237,7 @@ fn install_css() {
         return;
     };
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(
-        ".limux-zoom-level { min-width: 28px; padding: 0 6px; font-size: 0.85em; }\n\
-         .limux-zoom-level-active { background: alpha(#f0b45e, 0.35); font-weight: bold; }\n\
-         .limux-zoom-filter { padding: 0 8px; font-size: 0.85em; }\n\
-         .limux-zoom-filter-on { background: alpha(#6aa6ff, 0.3); }\n\
-         .limux-zoom-level:disabled, .limux-zoom-filter:disabled { opacity: 0.35; }\n",
-    );
+    provider.load_from_data(ZOOM_BAR_CSS);
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
@@ -302,5 +306,20 @@ mod tests {
         assert!(level_enabled(ZoomLevel::Z0, status(ZoomLevel::Z2, true)));
         assert!(level_enabled(ZoomLevel::Z3, status(ZoomLevel::Z0, true)));
         assert!(!level_enabled(ZoomLevel::Z1, status(ZoomLevel::Z0, false)));
+    }
+
+    #[test]
+    fn every_zoom_bar_rule_outranks_the_top_bar_button_rule() {
+        for rule in ZOOM_BAR_CSS.lines() {
+            let selectors = rule.split('{').next().unwrap();
+            for selector in selectors.split(',') {
+                assert!(
+                    selector
+                        .trim()
+                        .starts_with(".limux-top-bar-btn.limux-zoom-"),
+                    "{selector}"
+                );
+            }
+        }
     }
 }
