@@ -66,6 +66,12 @@ mod millis {
 }
 /// A state file older than this many heartbeats belongs to a dead session.
 const STALE_HEARTBEATS: u64 = 3;
+/// How long the /dip pane keeps a finished run in its list.
+const RECENT_DONE_MS: u64 = 60_000;
+/// A run at its usage limit waits for the reset, so it stays longer.
+const RECENT_LIMIT_MS: u64 = 30 * 60_000;
+/// The /dip pane lists at most this many finished runs per group.
+const RECENT_DONE_COUNT: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -279,6 +285,39 @@ impl DipState {
         running.chain(finished).collect()
     }
 
+    /// The runs that the /dip pane lists, so the rail lists the same:
+    /// every running run, and per group (subagents, shells) the eight
+    /// latest finished ones that ended less than a minute before the
+    /// state's `updated_ms` (30 minutes for a run at its limit). The
+    /// mod's order is kept.
+    pub fn recent_runs(&self) -> Vec<&Run> {
+        let now = self.updated_ms;
+        let recent = |run: &&Run| {
+            let keep_ms = if run.status == RunStatus::Limit {
+                RECENT_LIMIT_MS
+            } else {
+                RECENT_DONE_MS
+            };
+            now.saturating_sub(run.ended_ms.unwrap_or(0)) <= keep_ms
+        };
+        let latest = |shells: bool| {
+            let mut done: Vec<&Run> = self
+                .runs
+                .iter()
+                .filter(|r| r.is_shell() == shells && !r.status.is_running())
+                .filter(recent)
+                .collect();
+            done.sort_by_key(|r| std::cmp::Reverse(r.ended_ms));
+            done.truncate(RECENT_DONE_COUNT);
+            done
+        };
+        let kept: Vec<&Run> = latest(false).into_iter().chain(latest(true)).collect();
+        self.runs
+            .iter()
+            .filter(|r| r.status.is_running() || kept.iter().any(|k| std::ptr::eq(*k, *r)))
+            .collect()
+    }
+
     pub fn run(&self, id: &str) -> Option<&Run> {
         self.runs.iter().find(|r| r.id == id)
     }
@@ -457,6 +496,43 @@ mod tests {
         assert!(state.is_stale(13_001));
         // A clock that runs behind the writer never counts as stale.
         assert!(!state.is_stale(0));
+    }
+
+    fn timed(id: &str, status: &str, ended_ms: Option<u64>, kind: Option<&str>) -> Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "status": status, "endedMs": ended_ms,
+            "kind": kind, "follow": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn recent_runs_match_the_dip_pane() {
+        let mut state = parse(SAMPLE).unwrap();
+        state.updated_ms = 10_000_000;
+        state.runs = vec![
+            timed("live", "running", None, None),
+            timed("old", "done", Some(10_000_000 - 61_000), None),
+            timed("fresh", "done", Some(10_000_000 - 5_000), None),
+            timed("no-end", "failed", None, None),
+            timed("paused", "limit", Some(10_000_000 - 20 * 60_000), None),
+            timed("sh-old", "done", Some(1_000), Some(SHELL_KIND)),
+            timed("sh-new", "done", Some(9_999_000), Some(SHELL_KIND)),
+        ];
+        let ids: Vec<&str> = state.recent_runs().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["live", "fresh", "paused", "sh-new"]);
+    }
+
+    #[test]
+    fn recent_runs_keep_the_eight_latest_finished_per_group() {
+        let mut state = parse(SAMPLE).unwrap();
+        state.updated_ms = 100_000;
+        state.runs = (0..10)
+            .map(|i| timed(&format!("r{i}"), "done", Some(90_000 + i), None))
+            .chain([timed("sh", "done", Some(90_000), Some(SHELL_KIND))])
+            .collect();
+        let ids: Vec<&str> = state.recent_runs().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "sh"]);
     }
 
     #[test]

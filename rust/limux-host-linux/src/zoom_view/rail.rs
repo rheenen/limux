@@ -35,7 +35,7 @@ pub fn clamp_width(width: i32) -> i32 {
 
 /// The run counts that the collapsed strip shows, one per status that
 /// has runs, in a fixed order: running first.
-pub fn strip_stats(runs: &[Run]) -> Vec<(RunStatus, usize)> {
+pub fn strip_stats(runs: &[&Run]) -> Vec<(RunStatus, usize)> {
     const ORDER: [RunStatus; 7] = [
         RunStatus::Running,
         RunStatus::Failed,
@@ -201,6 +201,7 @@ impl PlanRail {
         strip.append(&strip_close);
         strip.append(&strip_separator);
         strip.append(&strip_stats);
+        strip.set_cursor_from_name(Some("pointer"));
 
         root.append(&handle);
         root.append(&open_panel);
@@ -242,6 +243,20 @@ impl PlanRail {
         set_mode(&close, RailState::Closed);
         set_mode(&expand, RailState::Open);
         set_mode(&strip_close, RailState::Closed);
+        {
+            // A click anywhere on the strip expands the rail; the close
+            // button claims its own click first.
+            let click = gtk::GestureClick::new();
+            let weak = Rc::downgrade(&rail);
+            click.connect_released(move |_, _, _, _| {
+                if let Some(rail) = weak.upgrade() {
+                    if rail.mode() == RailState::Collapsed {
+                        rail.set_mode(RailState::Open);
+                    }
+                }
+            });
+            rail.strip.add_controller(click);
+        }
 
         {
             let weak = Rc::downgrade(&rail);
@@ -493,8 +508,9 @@ impl PlanRail {
             walk(&plan.nodes, 0, hide_done, state, &mut add_row);
         }
 
-        let runs: Vec<_> = state
-            .runs
+        // The same runs as the /dip pane: running, and finished for a minute.
+        let recent = state.recent_runs();
+        let runs: Vec<_> = recent
             .iter()
             .filter(|run| !hide_done || run.status.is_running())
             .collect();
@@ -511,14 +527,14 @@ impl PlanRail {
         }
         *self.row_runs.borrow_mut() = row_runs;
 
-        self.fill_strip(state);
+        self.fill_strip(state, &recent);
     }
 
-    fn fill_strip(&self, state: &DipState) {
+    fn fill_strip(&self, state: &DipState, recent: &[&Run]) {
         while let Some(child) = self.strip_stats.first_child() {
             self.strip_stats.remove(&child);
         }
-        let stats = strip_stats(&state.runs);
+        let stats = strip_stats(recent);
         for (status, count) in &stats {
             let stat = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let glyph = gtk::Label::new(Some(status.glyph()));
@@ -533,7 +549,7 @@ impl PlanRail {
         if stats.is_empty() {
             let none = gtk::Label::new(Some("0"));
             none.add_css_class("dim-label");
-            none.set_tooltip_text(Some("No subagents yet"));
+            none.set_tooltip_text(Some("No running or recent subagents"));
             self.strip_stats.append(&none);
         }
         let task = state
@@ -592,14 +608,14 @@ mod tests {
 
     #[test]
     fn strip_counts_each_status_with_runs_running_first() {
-        let runs = vec![
+        let runs = [
             run("a", "done"),
             run("b", "running"),
             run("c", "done"),
             run("d", "failed"),
         ];
         assert_eq!(
-            strip_stats(&runs),
+            strip_stats(&runs.iter().collect::<Vec<_>>()),
             vec![
                 (RunStatus::Running, 1),
                 (RunStatus::Failed, 1),

@@ -13,7 +13,7 @@ fewer rows. A limux-native plan rail shows the plan tree next to them.
 |---|---|
 | Default layout | Focus + tiles. Grid, Tree and Strip are options in Settings → Zoom view. |
 | Main terminal | Never narrower than `main_min_columns` (default 120). |
-| Plan rail | On every zoom level. Open (240 px by default; drag its left edge between 180 and 640 px, saved as `plan_rail_width`), collapsed (44 px strip with one glyph and count per run status; the plan title and active task are in its tooltip) or closed. A closed rail leaves a "Show plan" button in the header of the session pane. |
+| Plan rail | On every zoom level. Open (240 px by default; drag its left edge between 180 and 640 px, saved as `plan_rail_width`), collapsed (44 px strip with one glyph and count per run status; the plan title and active task are in its tooltip; a click anywhere on the strip opens the rail) or closed. The rail lists the same runs as the /dip pane: every running run, and per group (subagents, shells) the eight latest finished runs that ended less than one minute ago (30 minutes for a run at its limit). A closed rail leaves a "Show plan" button in the header of the session pane. |
 | Splits | Hidden on zoom-out; they come back at Z0. |
 | Zoom-in on a selected tile at Z1 | Opens the run as a new tab in the same pane. The tab runs the run's `chat` argv (or `follow` when `chat` is null). |
 | Takeover | Read-only until Enter on a typed line; Esc returns to read-only. This is `exec-tmux.sh chat` behaviour in the mod, not limux. |
