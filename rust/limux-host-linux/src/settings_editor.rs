@@ -1544,7 +1544,16 @@ mod tests {
             .filter_map(|page| page.downcast::<adw::ViewStackPage>().ok())
             .filter_map(|page| page.name().map(|name| name.to_string()))
             .collect();
-        assert_eq!(names, ["general", "hooks", "notifications", "keybindings"]);
+        assert_eq!(
+            names,
+            [
+                "general",
+                "hooks",
+                "notifications",
+                "zoom_view",
+                "keybindings"
+            ]
+        );
 
         fn collect_group_titles(widget: &gtk::Widget, out: &mut Vec<String>) {
             if let Some(group) = widget.downcast_ref::<adw::PreferencesGroup>() {
