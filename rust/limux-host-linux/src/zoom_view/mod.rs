@@ -17,3 +17,19 @@ pub mod view;
 /// selected zoom level and filter. One above user priority, as the
 /// workspace colour swatches do.
 pub(crate) const CSS_PRIORITY: u32 = gtk4::STYLE_PROVIDER_PRIORITY_USER + 1;
+
+/// The pointer's x in the window during `drag`. A drag handle moves with
+/// the edge it drags, and GTK gives the drag offset in the handle's own
+/// coordinates, so the offset alone lags behind the pointer. The window
+/// does not move: take the distance there.
+pub(crate) fn drag_x_in_window(drag: &gtk4::GestureDrag) -> Option<f64> {
+    use gtk4::prelude::*;
+    let widget = drag.widget()?;
+    let root = widget.root()?;
+    let (start_x, start_y) = drag.start_point()?;
+    let (dx, dy) = drag.offset()?;
+    let point = gtk4::graphene::Point::new((start_x + dx) as f32, (start_y + dy) as f32);
+    widget
+        .compute_point(&root, &point)
+        .map(|point| f64::from(point.x()))
+}

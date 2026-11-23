@@ -3,6 +3,8 @@
 
 use serde_json::{json, Value};
 
+use super::geometry::{ZoomLevel, MAX_MAIN_SHARE, MIN_MAIN_SHARE};
+
 pub const DEFAULT_MAIN_MIN_COLUMNS: u32 = 120;
 pub const MIN_MAIN_MIN_COLUMNS: u32 = 80;
 pub const MAX_MAIN_MIN_COLUMNS: u32 = 300;
@@ -114,6 +116,41 @@ pub struct ZoomViewConfig {
     pub ctrl_wheel: bool,
     /// Recently finished runs (the /dip pane's rule) stay as dimmed tiles.
     pub show_finished: bool,
+    /// The main terminal's dragged share of the width on Z1, Z2 and Z3,
+    /// in thousandths; 0 keeps the level's default.
+    pub main_share_permille: [u16; 3],
+}
+
+/// The JSON keys of `main_share`, one per zoomed level.
+const SHARE_KEYS: [&str; 3] = ["z1", "z2", "z3"];
+
+impl ZoomViewConfig {
+    /// The dragged share of `level`, or None for the default.
+    pub fn main_share(&self, level: ZoomLevel) -> Option<f64> {
+        let index = share_index(level)?;
+        let permille = self.main_share_permille[index];
+        (permille > 0).then(|| f64::from(permille) / 1000.0)
+    }
+
+    /// Keep a dragged share for `level`; None goes back to the default.
+    pub fn set_main_share(&mut self, level: ZoomLevel, share: Option<f64>) {
+        if let Some(index) = share_index(level) {
+            self.main_share_permille[index] = share.map(share_permille).unwrap_or(0);
+        }
+    }
+}
+
+fn share_index(level: ZoomLevel) -> Option<usize> {
+    match level {
+        ZoomLevel::Z0 => None,
+        ZoomLevel::Z1 => Some(0),
+        ZoomLevel::Z2 => Some(1),
+        ZoomLevel::Z3 => Some(2),
+    }
+}
+
+fn share_permille(share: f64) -> u16 {
+    (share.clamp(MIN_MAIN_SHARE, MAX_MAIN_SHARE) * 1000.0).round() as u16
 }
 
 impl Default for ZoomViewConfig {
@@ -125,6 +162,7 @@ impl Default for ZoomViewConfig {
             plan_rail_width: DEFAULT_RAIL_WIDTH,
             ctrl_wheel: true,
             show_finished: true,
+            main_share_permille: [0; 3],
         }
     }
 }
@@ -166,6 +204,17 @@ impl ZoomViewConfig {
                 .unwrap_or(defaults.plan_rail_width),
             ctrl_wheel: flag("ctrl_wheel", defaults.ctrl_wheel),
             show_finished: flag("show_finished", defaults.show_finished),
+            main_share_permille: {
+                let shares = obj.get("main_share").and_then(Value::as_object);
+                SHARE_KEYS.map(|key| {
+                    shares
+                        .and_then(|shares| shares.get(key))
+                        .and_then(Value::as_f64)
+                        .filter(|share| share.is_finite() && *share > 0.0)
+                        .map(share_permille)
+                        .unwrap_or(0)
+                })
+            },
         }
     }
 
@@ -177,6 +226,12 @@ impl ZoomViewConfig {
             "plan_rail_width": self.plan_rail_width,
             "ctrl_wheel": self.ctrl_wheel,
             "show_finished": self.show_finished,
+            "main_share": SHARE_KEYS
+                .iter()
+                .zip(self.main_share_permille)
+                .filter(|(_, permille)| *permille > 0)
+                .map(|(key, permille)| (key.to_string(), json!(f64::from(permille) / 1000.0)))
+                .collect::<serde_json::Map<_, _>>(),
         })
     }
 }
@@ -216,6 +271,7 @@ mod tests {
             plan_rail_width: 360,
             ctrl_wheel: false,
             show_finished: false,
+            main_share_permille: [620, 0, 400],
         };
         assert_eq!(ZoomViewConfig::from_value(Some(&config.to_value())), config);
     }
@@ -233,6 +289,20 @@ mod tests {
         assert_eq!(config.main_min_columns, DEFAULT_MAIN_MIN_COLUMNS);
         assert_eq!(config.plan_rail, RailState::Closed);
         assert!(config.ctrl_wheel);
+    }
+
+    #[test]
+    fn main_shares_are_per_zoomed_level_clamped_and_optional() {
+        let value = json!({ "main_share": { "z1": 0.62, "z2": 2.0, "z3": "wide" } });
+        let mut config = ZoomViewConfig::from_value(Some(&value));
+        assert_eq!(config.main_share(ZoomLevel::Z1), Some(0.62));
+        assert_eq!(config.main_share(ZoomLevel::Z2), Some(MAX_MAIN_SHARE));
+        assert_eq!(config.main_share(ZoomLevel::Z3), None);
+        assert_eq!(config.main_share(ZoomLevel::Z0), None);
+        config.set_main_share(ZoomLevel::Z1, None);
+        config.set_main_share(ZoomLevel::Z0, Some(0.5));
+        assert_eq!(config.main_share(ZoomLevel::Z1), None);
+        assert_eq!(config.to_value()["main_share"], json!({ "z2": 0.9 }));
     }
 
     #[test]

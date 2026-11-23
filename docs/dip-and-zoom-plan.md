@@ -12,7 +12,7 @@ fewer rows. A limux-native plan rail shows the plan tree next to them.
 | Topic | Decision |
 |---|---|
 | Default layout | Focus + tiles. Grid, Tree and Strip are options in Settings → Zoom view. |
-| Main terminal | Never narrower than `main_min_columns` (default 120). |
+| Main terminal | A zoom step never makes it narrower than `main_min_columns` (default 120). A drag handle on its right edge (focus and grid layouts) sets its share of the width per zoom level, saved as `main_share` (`z1`, `z2`, `z3`); a dragged width may go down to 40 columns and always leaves one readable tile column. A double-click on the handle goes back to the level's default. |
 | Plan rail | On every zoom level. Open (240 px by default; drag its left edge between 180 and 640 px, saved as `plan_rail_width`), collapsed (44 px strip with one glyph and count per run status; the plan title and active task are in its tooltip; a click anywhere on the strip opens the rail) or closed. The rail lists the same runs as the /dip pane: every running run, and per group (subagents, shells) the eight latest finished runs that ended less than one minute ago (30 minutes for a run at its limit). A closed rail leaves a "Show plan" button in the header of the session pane. |
 | Splits | Hidden on zoom-out; they come back at Z0. |
 | Zoom-in | One level in; from Z1 back to Z0. The main terminal gets the keyboard focus; a selected tile does not matter. |

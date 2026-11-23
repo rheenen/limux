@@ -24,6 +24,8 @@ use crate::split_tree::SplitTreeContainer;
 use crate::terminal::{self, TerminalCallbacks, TerminalOptions, TerminalWidget};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// The drag handle between the main terminal and the rail or tiles.
+const MAIN_HANDLE_WIDTH: i32 = 6;
 const TILE_NAME_PREFIX: &str = "limux-zoom-tile:";
 const TILE_TITLE_HEIGHT: i32 = 24;
 /// Used until the main terminal reports its size.
@@ -138,6 +140,9 @@ pub struct ZoomView {
     main_title: CardTitle,
     show_plan: gtk::Button,
     rail_holder: gtk::Box,
+    /// The drag handle on the main card's right edge (focus and grid
+    /// layouts): it sets the main terminal's share of the width.
+    main_handle: gtk::Box,
     tiles_box: gtk::Box,
     tiles_header: gtk::Label,
     scroller: gtk::ScrolledWindow,
@@ -166,6 +171,8 @@ pub struct ZoomView {
     /// The tile font size and the font generation it was applied for.
     applied_tile_font: Cell<(f32, u64)>,
     filter: Cell<RunFilter>,
+    /// The share while the main handle is dragged; saved when it ends.
+    drag_share: Cell<Option<f64>>,
 }
 
 /// What the top-bar zoom buttons show for a workspace.
@@ -220,6 +227,8 @@ fn install_css() {
         ".limux-plan-rail { border-left: 1px solid alpha(currentColor, 0.12); }\n\
          .limux-plan-rail-handle { background: transparent; }\n\
          .limux-plan-rail-handle:hover { background: alpha(currentColor, 0.15); }\n\
+         .limux-zoom-main-handle { background: transparent; }\n\
+         .limux-zoom-main-handle:hover { background: alpha(currentColor, 0.15); }\n\
          .limux-plan-strip-count { font-weight: bold; font-size: 0.9em; }\n\
          .limux-zoom-tile, .limux-zoom-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
          .limux-zoom-card { border-color: alpha(#6aa6ff, 0.55); margin: 4px 0 4px 4px; }\n\
@@ -306,9 +315,20 @@ impl ZoomView {
         tiles_box.append(&empty);
         tiles_box.append(&indicator);
 
+        let main_handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main_handle.add_css_class("limux-zoom-main-handle");
+        main_handle.set_size_request(MAIN_HANDLE_WIDTH, -1);
+        main_handle.set_vexpand(true);
+        main_handle.set_hexpand(false);
+        main_handle.set_cursor_from_name(Some("col-resize"));
+        main_handle.set_tooltip_text(Some(
+            "Drag to change the width of the terminal and the subagents.\nDouble-click for the default width of this zoom level.",
+        ));
+
         frame.attach(&main_slot, 0, 0, 1, 1);
-        frame.attach(&rail_holder, 1, 0, 1, 1);
-        frame.attach(&tiles_box, 2, 0, 1, 1);
+        frame.attach(&main_handle, 1, 0, 1, 1);
+        frame.attach(&rail_holder, 2, 0, 1, 1);
+        frame.attach(&tiles_box, 3, 0, 1, 1);
 
         let view = Rc::new(Self {
             container: Rc::downgrade(container),
@@ -318,6 +338,7 @@ impl ZoomView {
             main_title,
             show_plan,
             rail_holder,
+            main_handle,
             tiles_box,
             tiles_header,
             scroller,
@@ -340,6 +361,7 @@ impl ZoomView {
             promoted: RefCell::default(),
             applied_tile_font: Cell::new((0.0, 0)),
             filter: Cell::new(RunFilter::default()),
+            drag_share: Cell::new(None),
         });
 
         container.rail_slot().append(&view.rail.root);
@@ -394,6 +416,7 @@ impl ZoomView {
                 }
             });
         }
+        view.connect_main_handle();
         {
             let weak = Rc::downgrade(&view);
             view.scroller.vadjustment().connect_value_changed(move |_| {
@@ -660,6 +683,83 @@ impl ZoomView {
             if self.level.get().is_zoomed() {
                 self.relayout();
             }
+        }
+    }
+
+    /// The main handle: a drag moves the main card's right edge (live),
+    /// its end saves the share for this zoom level, and a double-click
+    /// goes back to the level's default.
+    fn connect_main_handle(self: &Rc<Self>) {
+        let drag = gtk::GestureDrag::new();
+        // The main card's width and the pointer's window x at the start.
+        let start = Rc::new(Cell::new((0.0, 0.0)));
+        {
+            let weak = Rc::downgrade(self);
+            let start = start.clone();
+            drag.connect_drag_begin(move |drag, _, _| {
+                if let Some(view) = weak.upgrade() {
+                    let x = super::drag_x_in_window(drag).unwrap_or(0.0);
+                    start.set((f64::from(view.main_slot.width()), x));
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            let start = start.clone();
+            drag.connect_drag_update(move |drag, _, _| {
+                let Some(view) = weak.upgrade() else { return };
+                let (start_px, start_x) = start.get();
+                let x = super::drag_x_in_window(drag).unwrap_or(start_x);
+                let width = f64::from(view.size().0);
+                let share = geometry::dragged_share(start_px, x - start_x, width);
+                if view.drag_share.replace(Some(share)) != Some(share) {
+                    view.relayout();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            drag.connect_drag_end(move |_, _, _| {
+                let Some(view) = weak.upgrade() else { return };
+                // A click without a move has no share: the width stays.
+                if let Some(share) = view.drag_share.take() {
+                    view.save_main_share(Some(share));
+                }
+                view.relayout();
+            });
+        }
+        self.main_handle.add_controller(drag);
+
+        let click = gtk::GestureClick::new();
+        let weak = Rc::downgrade(self);
+        click.connect_pressed(move |_, n_press, _, _| {
+            if n_press != 2 {
+                return;
+            }
+            if let Some(view) = weak.upgrade() {
+                view.drag_share.set(None);
+                view.save_main_share(None);
+                view.relayout();
+            }
+        });
+        self.main_handle.add_controller(click);
+    }
+
+    /// Keep the main terminal's share for the current zoom level (None:
+    /// the default) for every workspace and the next start.
+    fn save_main_share(&self, share: Option<f64>) {
+        let level = self.level.get();
+        let snapshot = {
+            let mut config = self.config.borrow_mut();
+            let before = config.zoom_view.main_share_permille;
+            config.zoom_view.set_main_share(level, share);
+            if config.zoom_view.main_share_permille == before {
+                return;
+            }
+            config.clone()
+        };
+        if let Err(err) = crate::app_config::save(&snapshot) {
+            eprintln!("limux: zoom view: cannot save the terminal width: {err}");
         }
     }
 
@@ -1139,6 +1239,10 @@ impl ZoomView {
             cell_height,
             rail_width: self.rail.width(),
             main_min_columns: config.main_min_columns,
+            main_share: self
+                .drag_share
+                .get()
+                .or_else(|| config.main_share(self.level.get())),
         };
         let level = self.level.get();
         let placement = geometry::place(config.layout, frame, level);
@@ -1146,10 +1250,12 @@ impl ZoomView {
         let tiles = self.tiles.borrow();
         let tile_px_height = (f64::from(placement.tile_rows) * cell_height).round() as i32;
         let side_by_side = matches!(config.layout, ZoomLayout::Focus | ZoomLayout::Grid);
+        self.main_handle.set_visible(side_by_side);
         if side_by_side {
             place(&self.frame, &self.main_slot, 0, 0, 1, 1);
-            place(&self.frame, &self.rail_holder, 1, 0, 1, 1);
-            place(&self.frame, &self.tiles_box, 2, 0, 1, 1);
+            place(&self.frame, &self.main_handle, 1, 0, 1, 1);
+            place(&self.frame, &self.rail_holder, 2, 0, 1, 1);
+            place(&self.frame, &self.tiles_box, 3, 0, 1, 1);
             self.main_slot.set_hexpand(false);
             self.main_slot.set_vexpand(true);
             self.main_slot
@@ -1158,9 +1264,11 @@ impl ZoomView {
             self.scroller.set_propagate_natural_height(false);
             self.scroller.set_max_content_height(-1);
         } else {
+            // The handle is hidden; GTK skips a hidden grid child.
             place(&self.frame, &self.main_slot, 0, 0, 1, 1);
+            place(&self.frame, &self.main_handle, 3, 0, 1, 1);
             place(&self.frame, &self.tiles_box, 0, 1, 1, 1);
-            place(&self.frame, &self.rail_holder, 1, 0, 1, 2);
+            place(&self.frame, &self.rail_holder, 2, 0, 1, 2);
             // The tile row takes its natural height and the main terminal
             // the rest. A fixed main height would push the frame past the
             // workspace when the real tile chrome is taller than the

@@ -38,7 +38,7 @@ impl ZoomLevel {
 
     /// The share of the window's columns that the main terminal targets.
     /// Picked so that a 1920 px window gives 150 / 120 / 120 columns.
-    fn main_share(self) -> f64 {
+    pub fn main_share(self) -> f64 {
         match self {
             Self::Z0 => 1.0,
             Self::Z1 => 0.565,
@@ -77,6 +77,9 @@ pub struct Frame {
     /// The width of the plan rail as it is now (0 when closed or hidden).
     pub rail_width: f64,
     pub main_min_columns: u32,
+    /// The share of the width that the user dragged the main terminal to
+    /// on this level; None keeps the level's default share.
+    pub main_share: Option<f64>,
 }
 
 /// The chrome around a tile's text: title bar, border and padding.
@@ -108,8 +111,9 @@ fn cols_for(px: f64, cell: f64) -> u32 {
 }
 
 /// The focus layout (default): main at the left, full height; the rail;
-/// tiles at the right. The main terminal never goes below
-/// `main_min_columns`; at the floor a step takes space from the tiles.
+/// tiles at the right. A zoom step never makes the main terminal
+/// narrower than `main_min_columns`; at the floor a step takes space
+/// from the tiles. A width dragged with the main handle may go lower.
 pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
     let available = (frame.width - frame.rail_width).max(0.0);
     if !level.is_zoomed() {
@@ -122,8 +126,19 @@ pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
             visible_tiles: 0,
         };
     }
-    let floor_px = f64::from(frame.main_min_columns) * frame.cell_width + TILE_CHROME_WIDTH;
-    let target = frame.width * level.main_share();
+    // A dragged width is the user's choice: it may go below
+    // `main_min_columns`, down to the width of a readable tile.
+    let floor_columns = if frame.main_share.is_some() {
+        MIN_TILE_COLUMNS
+    } else {
+        frame.main_min_columns
+    };
+    let floor_px = f64::from(floor_columns) * frame.cell_width + TILE_CHROME_WIDTH;
+    let target = match frame.main_share {
+        // A dragged width leaves room for one readable tile column.
+        Some(share) => (frame.width * share).min(available - min_tile_area(frame.cell_width)),
+        None => frame.width * level.main_share(),
+    };
     let main_px = target.max(floor_px).min(available);
     let tile_area = (available - main_px).max(0.0);
 
@@ -154,6 +169,26 @@ pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
         tile_columns,
         visible_tiles: per_column * grid_columns,
     }
+}
+
+/// The narrowest tile area: one tile of `MIN_TILE_COLUMNS`, with the
+/// tile box margins.
+fn min_tile_area(cell_width: f64) -> f64 {
+    f64::from(MIN_TILE_COLUMNS) * cell_width + TILE_CHROME_WIDTH + 2.0 * TILE_GAP
+}
+
+/// The shares of the width that a drag can give the main terminal.
+pub const MIN_MAIN_SHARE: f64 = 0.15;
+pub const MAX_MAIN_SHARE: f64 = 0.9;
+
+/// The main terminal's share of `width` after a drag of `dx` pixels on
+/// its right edge, which started at `start_px`. `focus` applies the
+/// floor and the tile room after this.
+pub fn dragged_share(start_px: f64, dx: f64, width: f64) -> f64 {
+    if width <= 0.0 {
+        return MIN_MAIN_SHARE;
+    }
+    ((start_px + dx) / width).clamp(MIN_MAIN_SHARE, MAX_MAIN_SHARE)
 }
 
 /// The strip layout (option D): the main terminal at full width on top,
@@ -228,7 +263,53 @@ mod tests {
             cell_height: 17.0,
             rail_width: 240.0,
             main_min_columns: 120,
+            main_share: None,
         }
+    }
+
+    #[test]
+    fn a_dragged_share_moves_the_main_edge_within_the_floor_and_the_tile_room() {
+        let default = focus(frame(1920.0), ZoomLevel::Z1);
+        let wider = focus(
+            Frame {
+                main_share: Some(0.7),
+                ..frame(1920.0)
+            },
+            ZoomLevel::Z1,
+        );
+        assert!((wider.main_px - 1344.0).abs() < 0.01);
+        assert!(wider.main_px > default.main_px);
+        assert!(wider.tile_columns >= MIN_TILE_COLUMNS);
+        // A share past the tile room stops at one readable tile column.
+        let widest = focus(
+            Frame {
+                main_share: Some(0.9),
+                ..frame(1920.0)
+            },
+            ZoomLevel::Z1,
+        );
+        // The room holds the tile box margins too, so one column more fits.
+        assert!((MIN_TILE_COLUMNS..=MIN_TILE_COLUMNS + 2).contains(&widest.tile_columns));
+        assert_eq!(widest.grid_columns, 1);
+        // A small share goes below main_min_columns, down to a tile's
+        // minimum.
+        let narrow = focus(
+            Frame {
+                main_share: Some(0.15),
+                ..frame(1920.0)
+            },
+            ZoomLevel::Z1,
+        );
+        assert_eq!(narrow.main_columns, MIN_TILE_COLUMNS);
+        assert!(narrow.tile_columns > default.tile_columns);
+    }
+
+    #[test]
+    fn a_drag_gives_a_clamped_share_of_the_width() {
+        assert!((dragged_share(1000.0, 100.0, 2000.0) - 0.55).abs() < 1e-9);
+        assert_eq!(dragged_share(1000.0, -2000.0, 2000.0), MIN_MAIN_SHARE);
+        assert_eq!(dragged_share(1000.0, 5000.0, 2000.0), MAX_MAIN_SHARE);
+        assert_eq!(dragged_share(10.0, 0.0, 0.0), MIN_MAIN_SHARE);
     }
 
     #[test]

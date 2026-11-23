@@ -369,25 +369,31 @@ impl PlanRail {
         }
         {
             let drag = gtk::GestureDrag::new();
-            let start = Rc::new(Cell::new(open_width));
+            // The width and the pointer's window x when the drag started.
+            let start = Rc::new(Cell::new((open_width, 0.0)));
             let weak = Rc::downgrade(&rail);
             let begin = start.clone();
-            drag.connect_drag_begin(move |_, _, _| {
+            drag.connect_drag_begin(move |drag, _, _| {
                 if let Some(rail) = weak.upgrade() {
-                    begin.set(rail.open_width.get());
+                    let x = super::drag_x_in_window(drag).unwrap_or(0.0);
+                    begin.set((rail.open_width.get(), x));
                 }
             });
+            let moved = |drag: &gtk::GestureDrag, start: (i32, f64)| {
+                let x = super::drag_x_in_window(drag).unwrap_or(start.1);
+                dragged_width(start.0, x - start.1)
+            };
             let weak = Rc::downgrade(&rail);
             let update = start.clone();
-            drag.connect_drag_update(move |_, dx, _| {
+            drag.connect_drag_update(move |drag, _, _| {
                 if let Some(rail) = weak.upgrade() {
-                    rail.resize(dragged_width(update.get(), dx), false);
+                    rail.resize(moved(drag, update.get()), false);
                 }
             });
             let weak = Rc::downgrade(&rail);
-            drag.connect_drag_end(move |_, dx, _| {
+            drag.connect_drag_end(move |drag, _, _| {
                 if let Some(rail) = weak.upgrade() {
-                    rail.resize(dragged_width(start.get(), dx), true);
+                    rail.resize(moved(drag, start.get()), true);
                 }
             });
             rail.handle.add_controller(drag);
