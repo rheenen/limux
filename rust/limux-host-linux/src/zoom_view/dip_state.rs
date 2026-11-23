@@ -38,6 +38,32 @@ use serde::Deserialize;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_HEARTBEAT_MS: u64 = 5_000;
+
+/// Millisecond times as the writers give them. A JavaScript writer can
+/// send a fraction (`performance.timeOrigin + performance.now()`), so a
+/// non-negative float rounds to whole milliseconds instead of rejecting
+/// the whole file.
+mod millis {
+    use serde::{Deserialize, Deserializer};
+
+    fn from_f64<E: serde::de::Error>(value: f64) -> Result<u64, E> {
+        if value.is_finite() && value >= 0.0 && value <= u64::MAX as f64 {
+            Ok(value.round() as u64)
+        } else {
+            Err(E::custom(format!("not a millisecond time: {value}")))
+        }
+    }
+
+    pub fn required<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        from_f64(f64::deserialize(deserializer)?)
+    }
+
+    pub fn optional<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+        Option::<f64>::deserialize(deserializer)?
+            .map(from_f64)
+            .transpose()
+    }
+}
 /// A state file older than this many heartbeats belongs to a dead session.
 const STALE_HEARTBEATS: u64 = 3;
 
@@ -98,9 +124,9 @@ pub struct Run {
     #[serde(default)]
     pub parent: Option<String>,
     pub status: RunStatus,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "millis::optional")]
     pub started_ms: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "millis::optional")]
     pub ended_ms: Option<u64>,
     /// The argv of the read-only live view (the tile command).
     pub follow: Vec<String>,
@@ -183,8 +209,9 @@ pub struct PlanRef {
 #[serde(rename_all = "camelCase")]
 pub struct DipState {
     pub version: u32,
+    #[serde(deserialize_with = "millis::required")]
     pub updated_ms: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "millis::optional")]
     pub heartbeat_ms: Option<u64>,
     #[serde(default)]
     pub plans: Vec<PlanRef>,
@@ -468,6 +495,23 @@ mod tests {
             Some("exec '/a b/exec-tmux.sh' follow 'it'\\''s' ''")
         );
         assert_eq!(shell_command(&[]), None);
+    }
+
+    #[test]
+    fn fractional_millisecond_times_round_instead_of_failing() {
+        // The /dip mod sent codex times like this; one used to hide the rail.
+        let state = parse(
+            r#"{"version": 1, "updatedMs": 1795410728703.6, "heartbeatMs": 5000,
+                "runs": [{"id": "a", "name": "codex", "status": "done", "follow": [],
+                          "startedMs": 1795343866518.792, "endedMs": 1795343947213.4824}]}"#,
+        )
+        .unwrap();
+        assert_eq!(state.updated_ms, 1_795_410_728_704);
+        assert_eq!(state.runs[0].started_ms, Some(1_795_343_866_519));
+        assert_eq!(state.runs[0].ended_ms, Some(1_795_343_947_213));
+        assert!(parse(r#"{"version": 1, "updatedMs": -1}"#).is_err());
+        let none = parse(r#"{"version": 1, "updatedMs": 0, "runs": [{"id": "b", "name": "x", "status": "done", "follow": [], "startedMs": null}]}"#).unwrap();
+        assert_eq!(none.runs[0].started_ms, None);
     }
 
     #[test]

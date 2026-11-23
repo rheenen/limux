@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 pub const DEFAULT_MAIN_MIN_COLUMNS: u32 = 120;
 pub const MIN_MAIN_MIN_COLUMNS: u32 = 80;
 pub const MAX_MAIN_MIN_COLUMNS: u32 = 300;
+/// The open plan rail's width in pixels; the user drags its left edge.
+pub const DEFAULT_RAIL_WIDTH: u32 = 240;
+pub const MIN_RAIL_WIDTH: u32 = 180;
+pub const MAX_RAIL_WIDTH: u32 = 640;
 
 /// Where the zoom view puts the subagent tiles around the main terminal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -104,6 +108,8 @@ pub struct ZoomViewConfig {
     /// A zoom step never makes the main terminal narrower than this.
     pub main_min_columns: u32,
     pub plan_rail: RailState,
+    /// The width of the open plan rail; dragging its edge saves it here.
+    pub plan_rail_width: u32,
     /// Off: Ctrl+wheel goes to the terminal, as before.
     pub ctrl_wheel: bool,
     /// Finished runs stay as dimmed tiles until the session ends.
@@ -116,6 +122,7 @@ impl Default for ZoomViewConfig {
             layout: ZoomLayout::default(),
             main_min_columns: DEFAULT_MAIN_MIN_COLUMNS,
             plan_rail: RailState::default(),
+            plan_rail_width: DEFAULT_RAIL_WIDTH,
             ctrl_wheel: true,
             show_finished: true,
         }
@@ -151,6 +158,12 @@ impl ZoomViewConfig {
                 .and_then(Value::as_str)
                 .and_then(RailState::from_str)
                 .unwrap_or(defaults.plan_rail),
+            // An out-of-range width clamps: a wide screen saved a wide rail.
+            plan_rail_width: obj
+                .get("plan_rail_width")
+                .and_then(Value::as_u64)
+                .map(|w| w.clamp(u64::from(MIN_RAIL_WIDTH), u64::from(MAX_RAIL_WIDTH)) as u32)
+                .unwrap_or(defaults.plan_rail_width),
             ctrl_wheel: flag("ctrl_wheel", defaults.ctrl_wheel),
             show_finished: flag("show_finished", defaults.show_finished),
         }
@@ -161,6 +174,7 @@ impl ZoomViewConfig {
             "layout": self.layout.as_str(),
             "main_min_columns": self.main_min_columns,
             "plan_rail": self.plan_rail.as_str(),
+            "plan_rail_width": self.plan_rail_width,
             "ctrl_wheel": self.ctrl_wheel,
             "show_finished": self.show_finished,
         })
@@ -177,8 +191,20 @@ mod tests {
         assert_eq!(config.layout, ZoomLayout::Focus);
         assert_eq!(config.main_min_columns, 120);
         assert_eq!(config.plan_rail, RailState::Open);
+        assert_eq!(config.plan_rail_width, 240);
         assert!(config.ctrl_wheel);
         assert!(config.show_finished);
+    }
+
+    #[test]
+    fn rail_width_clamps_and_ignores_a_bad_type() {
+        let width = |value: Value| {
+            ZoomViewConfig::from_value(Some(&json!({ "plan_rail_width": value }))).plan_rail_width
+        };
+        assert_eq!(width(json!(320)), 320);
+        assert_eq!(width(json!(20)), MIN_RAIL_WIDTH);
+        assert_eq!(width(json!(5000)), MAX_RAIL_WIDTH);
+        assert_eq!(width(json!("wide")), DEFAULT_RAIL_WIDTH);
     }
 
     #[test]
@@ -187,6 +213,7 @@ mod tests {
             layout: ZoomLayout::Strip,
             main_min_columns: 140,
             plan_rail: RailState::Collapsed,
+            plan_rail_width: 360,
             ctrl_wheel: false,
             show_finished: false,
         };

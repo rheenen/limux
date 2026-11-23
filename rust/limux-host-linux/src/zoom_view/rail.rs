@@ -10,26 +10,72 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk4 as gtk;
 
-use super::config::RailState;
-use super::dip_state::{DipState, NodeStatus, PlanNode};
+use super::config::{RailState, MAX_RAIL_WIDTH, MIN_RAIL_WIDTH};
+use super::dip_state::{DipState, NodeStatus, PlanNode, Run, RunStatus};
+use super::view::status_css;
 
-pub const OPEN_WIDTH: i32 = 240;
 pub const COLLAPSED_WIDTH: i32 = 44;
+/// The drag handle on the rail's left edge; part of the open width.
+const HANDLE_WIDTH: i32 = 6;
 
 type RunCallback = dyn Fn(&str);
 type ModeCallback = dyn Fn(RailState);
+/// The new open width, and whether the drag ended (then it is saved).
+type WidthCallback = dyn Fn(i32, bool);
+
+/// The open width after a drag of `dx` pixels from `start`. The rail sits
+/// at the right, so a drag to the left (negative dx) widens it.
+pub fn dragged_width(start: i32, dx: f64) -> i32 {
+    clamp_width(start - dx.round() as i32)
+}
+
+pub fn clamp_width(width: i32) -> i32 {
+    width.clamp(MIN_RAIL_WIDTH as i32, MAX_RAIL_WIDTH as i32)
+}
+
+/// The run counts that the collapsed strip shows, one per status that
+/// has runs, in a fixed order: running first.
+pub fn strip_stats(runs: &[Run]) -> Vec<(RunStatus, usize)> {
+    const ORDER: [RunStatus; 7] = [
+        RunStatus::Running,
+        RunStatus::Failed,
+        RunStatus::Limit,
+        RunStatus::Stopped,
+        RunStatus::TakenOver,
+        RunStatus::Done,
+        RunStatus::Unknown,
+    ];
+    ORDER
+        .into_iter()
+        .map(|status| (status, runs.iter().filter(|r| r.status == status).count()))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
+fn status_word(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => "running",
+        RunStatus::Done => "done",
+        RunStatus::Failed => "failed",
+        RunStatus::Limit => "at their limit",
+        RunStatus::Stopped => "stopped",
+        RunStatus::TakenOver => "taken over",
+        RunStatus::Unknown => "in an unknown state",
+    }
+}
 
 pub struct PlanRail {
     pub root: gtk::Box,
+    handle: gtk::Box,
     open_panel: gtk::Box,
+    open_width: Cell<i32>,
     strip: gtk::Box,
     title: gtk::Label,
     picker: gtk::DropDown,
     picker_model: gtk::StringList,
     hide_done: gtk::CheckButton,
     list: gtk::ListBox,
-    strip_task: gtk::Label,
-    strip_counts: gtk::Label,
+    strip_stats: gtk::Box,
     mode: Cell<RailState>,
     has_content: Cell<bool>,
     state: RefCell<Option<DipState>>,
@@ -39,6 +85,7 @@ pub struct PlanRail {
     on_select_run: RefCell<Option<Box<RunCallback>>>,
     on_pick_plan: RefCell<Option<Box<RunCallback>>>,
     on_mode_changed: RefCell<Option<Box<ModeCallback>>>,
+    on_width_changed: RefCell<Option<Box<WidthCallback>>>,
 }
 
 fn node_glyph(status: NodeStatus) -> &'static str {
@@ -64,24 +111,6 @@ fn flat_button(icon: &str, tooltip: &str) -> gtk::Button {
 }
 
 /// The deepest active node, for the collapsed strip.
-/// Stacks the first `max` characters of `text`, one per line; a space
-/// becomes an empty line.
-fn vertical_text(text: &str, max: usize) -> String {
-    let chars: Vec<String> = text
-        .trim()
-        .chars()
-        .take(max)
-        .map(|c| {
-            if c.is_whitespace() {
-                String::new()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect();
-    chars.join("\n")
-}
-
 fn active_label(nodes: &[PlanNode]) -> Option<String> {
     nodes.iter().find_map(|node| {
         active_label(&node.children)
@@ -90,17 +119,27 @@ fn active_label(nodes: &[PlanNode]) -> Option<String> {
 }
 
 impl PlanRail {
-    pub fn new(initial: RailState) -> Rc<Self> {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    pub fn new(initial: RailState, open_width: u32) -> Rc<Self> {
+        let open_width = clamp_width(open_width as i32);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         root.add_css_class("limux-plan-rail");
         root.set_vexpand(true);
         // The title label expands inside the header; the rail itself keeps
-        // its fixed width and never takes space from the terminals.
+        // its width (the handle changes it) and never takes space from the
+        // terminals.
         root.set_hexpand(false);
+
+        // Drag handle: the open rail's left edge.
+        let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        handle.add_css_class("limux-plan-rail-handle");
+        handle.set_size_request(HANDLE_WIDTH, -1);
+        handle.set_vexpand(true);
+        handle.set_cursor_from_name(Some("col-resize"));
+        handle.set_tooltip_text(Some("Drag to resize the plan"));
 
         // Open panel: header, picker, filter, list.
         let open_panel = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        open_panel.set_size_request(OPEN_WIDTH, -1);
+        open_panel.set_size_request(open_width - HANDLE_WIDTH, -1);
         open_panel.set_vexpand(true);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         header.set_margin_start(8);
@@ -142,42 +181,43 @@ impl PlanRail {
         open_panel.append(&hide_done);
         open_panel.append(&scroller);
 
-        // Collapsed strip: expand, close, the active task, the counts.
+        // Collapsed strip: expand, close, then one count per run status
+        // (glyph above number). The active task is in the tooltip.
         let strip = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        strip.add_css_class("limux-plan-strip");
         strip.set_size_request(COLLAPSED_WIDTH, -1);
         strip.set_vexpand(true);
         let expand = flat_button("go-previous-symbolic", "Expand the plan");
         let strip_close = flat_button("window-close-symbolic", "Close the plan");
         expand.set_halign(gtk::Align::Center);
         strip_close.set_halign(gtk::Align::Center);
-        let strip_task = gtk::Label::new(None);
-        // One character per line (see `vertical_text`): GTK4 labels
-        // cannot rotate, and Pango wraps by syllable, not by character.
-        strip_task.set_justify(gtk::Justification::Center);
-        strip_task.set_vexpand(true);
-        strip_task.set_valign(gtk::Align::Start);
-        let strip_counts = gtk::Label::new(None);
-        strip_counts.add_css_class("dim-label");
-        strip_counts.set_margin_bottom(6);
+        let strip_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+        strip_separator.set_margin_start(8);
+        strip_separator.set_margin_end(8);
+        let strip_stats = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        strip_stats.set_margin_top(4);
+        strip_stats.set_halign(gtk::Align::Center);
         strip.append(&expand);
         strip.append(&strip_close);
-        strip.append(&strip_task);
-        strip.append(&strip_counts);
+        strip.append(&strip_separator);
+        strip.append(&strip_stats);
 
+        root.append(&handle);
         root.append(&open_panel);
         root.append(&strip);
 
         let rail = Rc::new(Self {
             root,
+            handle,
             open_panel,
+            open_width: Cell::new(open_width),
             strip,
             title,
             picker,
             picker_model,
             hide_done,
             list,
-            strip_task,
-            strip_counts,
+            strip_stats,
             mode: Cell::new(initial),
             has_content: Cell::new(false),
             state: RefCell::new(None),
@@ -187,6 +227,7 @@ impl PlanRail {
             on_select_run: RefCell::new(None),
             on_pick_plan: RefCell::new(None),
             on_mode_changed: RefCell::new(None),
+            on_width_changed: RefCell::new(None),
         });
 
         let set_mode = |button: &gtk::Button, mode: RailState| {
@@ -241,8 +282,61 @@ impl PlanRail {
                 }
             });
         }
+        {
+            let drag = gtk::GestureDrag::new();
+            let start = Rc::new(Cell::new(open_width));
+            let weak = Rc::downgrade(&rail);
+            let begin = start.clone();
+            drag.connect_drag_begin(move |_, _, _| {
+                if let Some(rail) = weak.upgrade() {
+                    begin.set(rail.open_width.get());
+                }
+            });
+            let weak = Rc::downgrade(&rail);
+            let update = start.clone();
+            drag.connect_drag_update(move |_, dx, _| {
+                if let Some(rail) = weak.upgrade() {
+                    rail.resize(dragged_width(update.get(), dx), false);
+                }
+            });
+            let weak = Rc::downgrade(&rail);
+            drag.connect_drag_end(move |_, dx, _| {
+                if let Some(rail) = weak.upgrade() {
+                    rail.resize(dragged_width(start.get(), dx), true);
+                }
+            });
+            rail.handle.add_controller(drag);
+        }
         rail.sync_visibility();
         rail
+    }
+
+    /// Called while the handle moves (`done` false) and once when the drag
+    /// ends (`done` true).
+    pub fn connect_width_changed(&self, f: impl Fn(i32, bool) + 'static) {
+        *self.on_width_changed.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// The width of the open rail, the handle included.
+    pub fn open_width(&self) -> i32 {
+        self.open_width.get()
+    }
+
+    /// Set the open width (clamped); for example from another workspace.
+    pub fn set_open_width(&self, width: i32) {
+        let width = clamp_width(width);
+        self.open_width.set(width);
+        self.open_panel.set_size_request(width - HANDLE_WIDTH, -1);
+    }
+
+    fn resize(&self, width: i32, done: bool) {
+        let changed = clamp_width(width) != self.open_width.get();
+        self.set_open_width(width);
+        if changed || done {
+            if let Some(f) = self.on_width_changed.borrow().as_ref() {
+                f(self.open_width.get(), done);
+            }
+        }
     }
 
     pub fn connect_select_run(&self, f: impl Fn(&str) + 'static) {
@@ -283,7 +377,7 @@ impl PlanRail {
             return 0.0;
         }
         match self.mode.get() {
-            RailState::Open => f64::from(OPEN_WIDTH),
+            RailState::Open => f64::from(self.open_width.get()),
             RailState::Collapsed => f64::from(COLLAPSED_WIDTH),
             RailState::Closed => 0.0,
         }
@@ -294,6 +388,7 @@ impl PlanRail {
         self.root
             .set_visible(self.has_content.get() && mode != RailState::Closed);
         self.open_panel.set_visible(mode == RailState::Open);
+        self.handle.set_visible(mode == RailState::Open);
         self.strip.set_visible(mode == RailState::Collapsed);
     }
 
@@ -416,20 +511,43 @@ impl PlanRail {
         }
         *self.row_runs.borrow_mut() = row_runs;
 
-        let running = state.runs.iter().filter(|r| r.status.is_running()).count();
-        self.strip_counts
-            .set_label(&format!("{running}/{}", state.runs.len()));
-        self.strip_counts.set_tooltip_text(Some(&format!(
-            "{running} of {} subagents running",
-            state.runs.len()
-        )));
+        self.fill_strip(state);
+    }
+
+    fn fill_strip(&self, state: &DipState) {
+        while let Some(child) = self.strip_stats.first_child() {
+            self.strip_stats.remove(&child);
+        }
+        let stats = strip_stats(&state.runs);
+        for (status, count) in &stats {
+            let stat = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let glyph = gtk::Label::new(Some(status.glyph()));
+            glyph.add_css_class(status_css(*status));
+            let number = gtk::Label::new(Some(&count.to_string()));
+            number.add_css_class("limux-plan-strip-count");
+            stat.append(&glyph);
+            stat.append(&number);
+            stat.set_tooltip_text(Some(&format!("{count} {}", status_word(*status))));
+            self.strip_stats.append(&stat);
+        }
+        if stats.is_empty() {
+            let none = gtk::Label::new(Some("0"));
+            none.add_css_class("dim-label");
+            none.set_tooltip_text(Some("No subagents yet"));
+            self.strip_stats.append(&none);
+        }
         let task = state
             .plan
             .as_ref()
-            .and_then(|plan| active_label(&plan.nodes))
-            .unwrap_or_default();
-        self.strip_task.set_label(&vertical_text(&task, 24));
-        self.strip_task.set_tooltip_text(Some(&task));
+            .and_then(|plan| active_label(&plan.nodes));
+        let title = state.plan.as_ref().map(|p| p.title.as_str());
+        let tip = match (title, task) {
+            (Some(title), Some(task)) => format!("{title}\nNow: {task}"),
+            (Some(title), None) => title.to_string(),
+            (None, Some(task)) => format!("Now: {task}"),
+            (None, None) => "Subagents".to_string(),
+        };
+        self.strip.set_tooltip_text(Some(&tip));
     }
 }
 
@@ -465,13 +583,37 @@ mod tests {
         assert_eq!(active_label(&nodes[..1]), None);
     }
 
+    fn run(id: &str, status: &str) -> Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "status": status, "follow": []
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn vertical_text_puts_one_character_per_line() {
+    fn strip_counts_each_status_with_runs_running_first() {
+        let runs = vec![
+            run("a", "done"),
+            run("b", "running"),
+            run("c", "done"),
+            run("d", "failed"),
+        ];
         assert_eq!(
-            vertical_text("Rail widget", 24),
-            "R\na\ni\nl\n\nw\ni\nd\ng\ne\nt"
+            strip_stats(&runs),
+            vec![
+                (RunStatus::Running, 1),
+                (RunStatus::Failed, 1),
+                (RunStatus::Done, 2)
+            ]
         );
-        assert_eq!(vertical_text("  abcdef ", 3), "a\nb\nc");
-        assert_eq!(vertical_text("", 24), "");
+        assert!(strip_stats(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_drag_to_the_left_widens_the_rail_within_its_limits() {
+        assert_eq!(dragged_width(240, -60.0), 300);
+        assert_eq!(dragged_width(240, 20.4), 220);
+        assert_eq!(dragged_width(240, 500.0), MIN_RAIL_WIDTH as i32);
+        assert_eq!(dragged_width(240, -2000.0), MAX_RAIL_WIDTH as i32);
     }
 }

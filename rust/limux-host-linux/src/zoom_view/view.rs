@@ -56,7 +56,7 @@ const STATUS_CSS: [&str; 7] = [
     "limux-zoom-st-unknown",
 ];
 
-fn status_css(status: RunStatus) -> &'static str {
+pub(super) fn status_css(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Running => STATUS_CSS[0],
         RunStatus::Done => STATUS_CSS[1],
@@ -159,6 +159,9 @@ pub struct ZoomView {
     /// Called when `status()` changes (the top bar follows it).
     on_change: RefCell<Option<Rc<dyn Fn()>>>,
     last_status: Cell<Option<ZoomStatus>>,
+    /// The saved rail width this view last applied; another workspace's
+    /// drag changes the setting, and the poll then follows it.
+    applied_rail_width: Cell<u32>,
     filter: Cell<RunFilter>,
 }
 
@@ -224,6 +227,9 @@ fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         ".limux-plan-rail { border-left: 1px solid alpha(currentColor, 0.12); }\n\
+         .limux-plan-rail-handle { background: transparent; }\n\
+         .limux-plan-rail-handle:hover { background: alpha(currentColor, 0.15); }\n\
+         .limux-plan-strip-count { font-weight: bold; font-size: 0.9em; }\n\
          .limux-zoom-tile, .limux-zoom-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
          .limux-zoom-card { border-color: alpha(#6aa6ff, 0.55); margin: 4px 0 4px 4px; }\n\
          .limux-zoom-tile-done { opacity: 0.6; }\n\
@@ -250,8 +256,11 @@ fn install_css() {
 impl ZoomView {
     pub fn new(container: &Rc<SplitTreeContainer>, config: Rc<RefCell<AppConfig>>) -> Rc<Self> {
         install_css();
-        let initial_rail = config.borrow().zoom_view.plan_rail;
-        let rail = PlanRail::new(initial_rail);
+        let (initial_rail, rail_width) = {
+            let config = config.borrow();
+            (config.zoom_view.plan_rail, config.zoom_view.plan_rail_width)
+        };
+        let rail = PlanRail::new(initial_rail, rail_width);
 
         let frame = gtk::Grid::new();
         frame.set_hexpand(true);
@@ -339,6 +348,7 @@ impl ZoomView {
             timer: RefCell::new(None),
             on_change: RefCell::new(None),
             last_status: Cell::new(None),
+            applied_rail_width: Cell::new(rail_width),
             filter: Cell::new(RunFilter::default()),
         });
 
@@ -364,6 +374,18 @@ impl ZoomView {
             view.rail.connect_pick_plan(move |plan| {
                 if let Some(view) = weak.upgrade() {
                     view.write_plan_choice(plan);
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            view.rail.connect_width_changed(move |width, done| {
+                let Some(view) = weak.upgrade() else { return };
+                if view.level.get().is_zoomed() {
+                    view.relayout();
+                }
+                if done {
+                    view.save_rail_width(width);
                 }
             });
         }
@@ -588,6 +610,7 @@ impl ZoomView {
     }
 
     fn poll(self: &Rc<Self>) {
+        self.follow_saved_rail_width();
         if !self.level.get().is_zoomed() {
             if let Some(pane) = self.focused_pane() {
                 let session = self.session_for_pane(&pane);
@@ -603,6 +626,34 @@ impl ZoomView {
             self.sync_titles();
         }
         self.notify_status();
+    }
+
+    fn follow_saved_rail_width(&self) {
+        let saved = self.config.borrow().zoom_view.plan_rail_width;
+        if self.applied_rail_width.replace(saved) != saved && self.rail.open_width() != saved as i32
+        {
+            self.rail.set_open_width(saved as i32);
+            if self.level.get().is_zoomed() {
+                self.relayout();
+            }
+        }
+    }
+
+    /// Keep a dragged rail width for new workspaces and the next start.
+    fn save_rail_width(&self, width: i32) {
+        let width = width.max(0) as u32;
+        let snapshot = {
+            let mut config = self.config.borrow_mut();
+            if config.zoom_view.plan_rail_width == width {
+                return;
+            }
+            config.zoom_view.plan_rail_width = width;
+            self.applied_rail_width.set(width);
+            config.clone()
+        };
+        if let Err(err) = crate::app_config::save(&snapshot) {
+            eprintln!("limux: zoom view: cannot save the plan rail width: {err}");
+        }
     }
 
     fn write_plan_choice(&self, plan: &str) {
