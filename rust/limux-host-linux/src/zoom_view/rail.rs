@@ -130,6 +130,22 @@ struct RailRow {
     summary: Option<String>,
 }
 
+/// True when a child plan node only repeats its parent's title: "0 Setup"
+/// under "Phase 0 Setup". The words "Phase" and "Step" at the start, case
+/// and spacing do not count.
+fn repeats_parent(parent: &str, child: &str) -> bool {
+    fn core(label: &str) -> String {
+        let words: Vec<String> = label.split_whitespace().map(str::to_lowercase).collect();
+        let skip = usize::from(matches!(
+            words.first().map(String::as_str),
+            Some("phase" | "step")
+        ));
+        words[skip..].join(" ")
+    }
+    let child = core(child);
+    !child.is_empty() && core(parent) == child
+}
+
 /// The summary line under a run, or None when it has none.
 fn summary_of(run: &Run) -> Option<String> {
     run.summary
@@ -590,8 +606,18 @@ impl PlanRail {
                 if hide_done && !node.has_open_work() {
                     continue;
                 }
-                let run_glyph = node
+                // A child that only repeats its phase title gets no row of
+                // its own: the phase row takes its run, its children move up.
+                let repeats: Vec<&PlanNode> = node
+                    .children
+                    .iter()
+                    .filter(|child| repeats_parent(&node.label, &child.label))
+                    .collect();
+                let run = node
                     .run
+                    .clone()
+                    .or_else(|| repeats.iter().find_map(|child| child.run.clone()));
+                let run_glyph = run
                     .as_deref()
                     .and_then(|id| state.run(id))
                     .map(|run| format!("  {}", run.status.glyph()))
@@ -599,11 +625,22 @@ impl PlanRail {
                 add(RailRow {
                     text: format!("{} {}{}", node_glyph(node.status), node.label, run_glyph),
                     depth,
-                    run: node.run.clone(),
+                    run,
                     css: node_css(node.status),
                     summary: None,
                 });
-                walk(&node.children, depth + 1, hide_done, state, add);
+                let children: Vec<PlanNode> = node
+                    .children
+                    .iter()
+                    .flat_map(|child| {
+                        if repeats.iter().any(|r| std::ptr::eq(*r, child)) {
+                            child.children.clone()
+                        } else {
+                            vec![child.clone()]
+                        }
+                    })
+                    .collect();
+                walk(&children, depth + 1, hide_done, state, add);
             }
         }
         if let Some(plan) = state.plan.as_ref() {
@@ -742,6 +779,17 @@ mod tests {
         assert_eq!(node_css(NodeStatus::Failed), Some("limux-zoom-st-failed"));
         assert_eq!(node_css(NodeStatus::Blocked), Some("limux-zoom-st-limit"));
         assert_eq!(node_css(NodeStatus::Todo), None);
+    }
+
+    #[test]
+    fn a_child_that_repeats_its_phase_title_is_found() {
+        assert!(repeats_parent(
+            "Phase 0 Existing bugs: run ref",
+            "0  existing bugs: run ref"
+        ));
+        assert!(repeats_parent("Phase 2 Doctor", "Phase 2 Doctor"));
+        assert!(!repeats_parent("Phase 2 Doctor", "2 Doctor: tests"));
+        assert!(!repeats_parent("Phase", ""));
     }
 
     #[test]
