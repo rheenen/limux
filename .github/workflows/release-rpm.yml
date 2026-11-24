@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (without v prefix)"
+        description: "Version to build, without v prefix (x.y.z or x.y.z-suffix, e.g. 0.1.36-zoom.2)"
         required: true
 
 permissions:
@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      rpm_file: ${{ steps.rpm.outputs.rpm_file }}
 
     steps:
       - name: Check out repository
@@ -52,7 +53,7 @@ jobs:
           else
             version="${REF_NAME#v}"
           fi
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! ./scripts/validate-release-version.sh "$version" >/dev/null; then
             echo "::error::Invalid release version: $version"
             exit 1
           fi
@@ -137,11 +138,14 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          source scripts/release-version.sh
           ARCH="$(uname -m)"
           RPM_ARCH="x86_64"
           [ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
-          RPM_OUTPUT="dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+          RPM_FILE="$(rpm_file_name "$VERSION" "$RPM_ARCH")"
+          RPM_OUTPUT="dist/$RPM_FILE"
           test -f "$RPM_OUTPUT"
+          echo "rpm_file=$RPM_FILE" >> "$GITHUB_OUTPUT"
           echo "rpm_path=$RPM_OUTPUT" >> "$GITHUB_OUTPUT"
           echo "rpm_arch=$RPM_ARCH" >> "$GITHUB_OUTPUT"
 
@@ -172,7 +176,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.rpm.outputs.version }}
-          files: dist/limux-${{ needs.rpm.outputs.version }}-1.x86_64.rpm
+          files: dist/${{ needs.rpm.outputs.rpm_file }}
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

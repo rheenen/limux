@@ -14,6 +14,8 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 "$ROOT_DIR/scripts/validate-release-version.sh" "$VERSION" >/dev/null
+# shellcheck source=scripts/release-version.sh
+source "$ROOT_DIR/scripts/release-version.sh"
 
 case "$MODE" in
     linux | rpm | all) ;;
@@ -34,7 +36,8 @@ DEB_ARCH="amd64"
 [ "$ARCH" = "aarch64" ] && DEB_ARCH="arm64"
 RPM_ARCH="x86_64"
 [ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
-EXPECTED_VERSION="limux $VERSION"
+# The binaries report the Cargo version, without a fork suffix.
+EXPECTED_VERSION="limux $(release_base_version "$VERSION")"
 SMOKE_ROOT="$(mktemp -d -t limux-release-smoke-XXXXXX)"
 trap 'find "$SMOKE_ROOT" -depth -delete' EXIT
 
@@ -211,9 +214,10 @@ smoke_linux() {
 }
 
 smoke_rpm() {
-    local rpm="$DIST_DIR/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+    local rpm
+    rpm="$DIST_DIR/$(rpm_file_name "$VERSION" "$RPM_ARCH")"
     local rpm_root="$SMOKE_ROOT/rpm"
-    local metadata_version
+    local metadata_version metadata_release expected_release
 
     require_artifact "$rpm"
     if ! command -v rpm >/dev/null 2>&1 || ! command -v rpm2cpio >/dev/null 2>&1 || ! command -v cpio >/dev/null 2>&1; then
@@ -221,8 +225,14 @@ smoke_rpm() {
         exit 1
     fi
     metadata_version="$(rpm -qp --qf '%{VERSION}' "$rpm")"
-    if [ "$metadata_version" != "$VERSION" ]; then
-        echo "ERROR: RPM metadata reports '$metadata_version', expected '$VERSION'" >&2
+    if [ "$metadata_version" != "$(release_base_version "$VERSION")" ]; then
+        echo "ERROR: RPM metadata reports version '$metadata_version', expected '$(release_base_version "$VERSION")'" >&2
+        exit 1
+    fi
+    metadata_release="$(rpm -qp --qf '%{RELEASE}' "$rpm")"
+    expected_release="$(rpm_release "$VERSION")"
+    if [ "$metadata_release" != "$expected_release" ]; then
+        echo "ERROR: RPM metadata reports release '$metadata_release', expected '$expected_release'" >&2
         exit 1
     fi
 

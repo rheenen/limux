@@ -6,11 +6,17 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Read version from workspace Cargo.toml (single source of truth)
 VERSION="${1:-$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
 "$ROOT_DIR/scripts/validate-release-version.sh" "$VERSION" >/dev/null
+# shellcheck source=scripts/release-version.sh
+source "$ROOT_DIR/scripts/release-version.sh"
 ARCH="$(uname -m)"
 DEB_ARCH="amd64"
 [ "$ARCH" = "aarch64" ] && DEB_ARCH="arm64"
 RPM_ARCH="x86_64"
 [ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
+# RPM forbids "-" in Version: x.y.z goes in Version, the suffix in Release.
+RPM_VERSION="$(release_base_version "$VERSION")"
+RPM_RELEASE="$(rpm_release "$VERSION")"
+RPM_FILE="$(rpm_file_name "$VERSION" "$RPM_ARCH")"
 
 PKG_BASE="limux-${VERSION}-linux-${ARCH}"
 STAGE="/tmp/limux-staging"
@@ -371,10 +377,10 @@ build_rpm_source_tree() {
 }
 
 build_rpm_package() {
-    local rpm_src_dir="/tmp/limux-$VERSION"
-    local rpm_tarball="/tmp/limux-$VERSION.tar.gz"
+    local rpm_src_dir="/tmp/limux-$RPM_VERSION"
+    local rpm_tarball="/tmp/limux-$RPM_VERSION.tar.gz"
     local rpmbuild_dir="/tmp/rpmbuild-$VERSION"
-    local rpm_output="$rpmbuild_dir/RPMS/${RPM_ARCH}/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+    local rpm_output="$rpmbuild_dir/RPMS/${RPM_ARCH}/${RPM_FILE}"
 
     if ! command -v rpmbuild >/dev/null 2>&1; then
         echo "  WARNING: rpmbuild not found, skipping RPM"
@@ -382,7 +388,7 @@ build_rpm_package() {
     fi
 
     build_rpm_source_tree "$rpm_src_dir"
-    tar -czf "$rpm_tarball" -C /tmp "limux-$VERSION"
+    tar -czf "$rpm_tarball" -C /tmp "limux-$RPM_VERSION"
     remove_tree "$rpm_src_dir"
 
     remove_tree "$rpmbuild_dir"
@@ -392,13 +398,14 @@ build_rpm_package() {
 
     rpmbuild -bb \
         --define "_topdir $rpmbuild_dir" \
-        --define "version $VERSION" \
+        --define "version $RPM_VERSION" \
+        --define "limux_release $RPM_RELEASE" \
         --target "$RPM_ARCH" \
         "$rpmbuild_dir/SPECS/limux.spec" 2>&1
 
     if [ -f "$rpm_output" ]; then
         cp "$rpm_output" "$OUT_DIR/"
-        echo "  -> dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+        echo "  -> dist/${RPM_FILE}"
     else
         echo "  WARNING: rpmbuild did not produce expected RPM file"
     fi
@@ -1200,5 +1207,5 @@ echo ""
 echo "Install options:"
 echo "  Tarball:   tar xzf dist/${PKG_BASE}.tar.gz && cd ${PKG_BASE} && sudo ./install.sh"
 echo "  Deb:       sudo dpkg -i ./dist/limux_${VERSION}_${DEB_ARCH}.deb"
-echo "  RPM:       sudo rpm -i ./dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+echo "  RPM:       sudo rpm -i ./dist/${RPM_FILE}"
 echo "  AppImage:  chmod +x dist/Limux-${VERSION}-${ARCH}.AppImage && ./dist/Limux-${VERSION}-${ARCH}.AppImage"

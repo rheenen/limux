@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (without v prefix)"
+        description: "Version to build, without v prefix (x.y.z or x.y.z-suffix, e.g. 0.1.36-zoom.2)"
         required: true
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
           else
             version="${REF_NAME#v}"
           fi
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! ./scripts/validate-release-version.sh "$version" >/dev/null; then
             echo "::error::Invalid release version: $version"
             exit 1
           fi

@@ -2,7 +2,7 @@
 
 Name:       limux
 Version:    %{version}
-Release:    1%{?dist}
+Release:    %{?limux_release}%{!?limux_release:1}%{?dist}
 Summary:    GPU-accelerated terminal workspace manager for Linux
 License:    MIT
 URL:        https://github.com/am-will/limux
