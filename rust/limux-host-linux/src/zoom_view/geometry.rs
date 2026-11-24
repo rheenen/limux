@@ -139,8 +139,16 @@ pub fn focus(frame: Frame, tiles: u32) -> Placement {
 
 /// The narrowest tile area: one tile of `MIN_TILE_COLUMNS`, with the
 /// tile box margins.
-fn min_tile_area(cell_width: f64) -> f64 {
+pub fn min_tile_area(cell_width: f64) -> f64 {
     f64::from(MIN_TILE_COLUMNS) * cell_width + TILE_CHROME_WIDTH + 2.0 * TILE_GAP
+}
+
+/// The widest the rail may get beside terminals `main_px` wide in a
+/// frame `width` wide: the tiles keep the room of one readable tile. A
+/// drag of the rail's handle then moves only the edge between the rail
+/// and the tiles, and the terminals keep their width.
+pub fn max_rail_width(width: f64, main_px: f64, cell_width: f64) -> f64 {
+    (width - main_px - min_tile_area(cell_width)).max(0.0)
 }
 
 /// The shares of the width that a drag can give the main terminal.
@@ -257,6 +265,38 @@ mod tests {
         );
         assert_eq!(narrow.main_columns, MIN_TILE_COLUMNS);
         assert!(narrow.tile_columns > default.tile_columns);
+    }
+
+    #[test]
+    fn a_rail_within_its_limit_keeps_the_terminals_width() {
+        // The terminals at the tile room cap, as a drag far right leaves
+        // them; the share then pins that width.
+        let capped = focus(
+            Frame {
+                main_share: Some(0.9),
+                ..frame(1920.0)
+            },
+            1,
+        );
+        let pinned = Frame {
+            main_share: Some(capped.main_px / 1920.0),
+            ..frame(1920.0)
+        };
+        let limit = max_rail_width(1920.0, capped.main_px, 7.22);
+        assert!((limit - 240.0).abs() < 0.01, "{limit}");
+        for rail_width in [180.0, 200.0, limit] {
+            let p = focus(
+                Frame {
+                    rail_width,
+                    ..pinned
+                },
+                1,
+            );
+            assert!((p.main_px - capped.main_px).abs() < 0.01, "{rail_width}");
+        }
+        // With room to spare, the rail may grow into the tiles.
+        let default = focus(frame(1920.0), 1);
+        assert!(max_rail_width(1920.0, default.main_px, 7.22) > 240.0);
     }
 
     #[test]

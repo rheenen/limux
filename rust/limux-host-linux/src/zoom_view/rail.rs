@@ -45,6 +45,13 @@ pub fn dragged_width(side: HandleSide, start: i32, dx: f64) -> i32 {
     })
 }
 
+/// The open width `width` within `limit`, the widest the room beside
+/// the rail allows. A rail that is already wider than `limit` (the
+/// window got narrower) only gets narrower: a drag never makes it jump.
+pub fn limited_width(width: i32, limit: i32, current: i32) -> i32 {
+    clamp_width(width).min(limit.max(current))
+}
+
 pub fn clamp_width(width: i32) -> i32 {
     width.clamp(MIN_RAIL_WIDTH as i32, MAX_RAIL_WIDTH as i32)
 }
@@ -86,6 +93,9 @@ pub struct PlanRail {
     handle_side: Cell<HandleSide>,
     open_panel: gtk::Box,
     open_width: Cell<i32>,
+    /// The widest a drag may make the rail; the view sets it so that the
+    /// tiles keep their room.
+    max_open_width: Cell<i32>,
     strip: gtk::Box,
     title: gtk::Label,
     picker: gtk::DropDown,
@@ -317,6 +327,7 @@ impl PlanRail {
             handle_side: Cell::new(HandleSide::Start),
             open_panel,
             open_width: Cell::new(open_width),
+            max_open_width: Cell::new(i32::MAX),
             strip,
             title,
             picker,
@@ -481,8 +492,15 @@ impl PlanRail {
         self.open_panel.set_size_request(width - HANDLE_WIDTH, -1);
     }
 
+    /// The widest a drag may make the rail (`i32::MAX`: no limit but
+    /// `MAX_RAIL_WIDTH`).
+    pub fn set_max_open_width(&self, limit: i32) {
+        self.max_open_width.set(limit);
+    }
+
     fn resize(&self, width: i32, done: bool) {
-        let changed = clamp_width(width) != self.open_width.get();
+        let width = limited_width(width, self.max_open_width.get(), self.open_width.get());
+        let changed = width != self.open_width.get();
         self.set_open_width(width);
         if changed || done {
             if let Some(f) = self.on_width_changed.borrow().as_ref() {
@@ -880,5 +898,16 @@ mod tests {
         assert_eq!(dragged_width(side, 240, -20.4), 220);
         assert_eq!(dragged_width(side, 240, -500.0), MIN_RAIL_WIDTH as i32);
         assert_eq!(dragged_width(side, 240, 2000.0), MAX_RAIL_WIDTH as i32);
+    }
+
+    #[test]
+    fn a_drag_never_widens_the_rail_past_the_room_beside_it() {
+        assert_eq!(limited_width(400, 300, 240), 300);
+        assert_eq!(limited_width(260, 300, 240), 260);
+        assert_eq!(limited_width(200, 300, 240), 200);
+        // Already wider than the room: it may only get narrower.
+        assert_eq!(limited_width(360, 300, 340), 340);
+        assert_eq!(limited_width(320, 300, 340), 320);
+        assert_eq!(limited_width(100, 300, 340), MIN_RAIL_WIDTH as i32);
     }
 }

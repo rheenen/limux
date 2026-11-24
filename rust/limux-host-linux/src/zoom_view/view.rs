@@ -499,9 +499,17 @@ impl ZoomView {
             let weak = Rc::downgrade(&view);
             view.rail.connect_width_changed(move |width, done| {
                 let Some(view) = weak.upgrade() else { return };
+                if !done {
+                    view.pin_main_width();
+                }
                 view.relayout();
                 if done {
                     view.save_rail_width(width);
+                    // The terminals' width that the rail drag pinned.
+                    if let Some(share) = view.drag_share.take() {
+                        view.save_main_share(Some(share));
+                        view.relayout();
+                    }
                 }
             });
         }
@@ -913,6 +921,25 @@ impl ZoomView {
         self.main_handle.add_controller(click);
     }
 
+    /// The rail's handle moves only the edge between the rail and the
+    /// tiles. A dragged terminal width can sit at the cap that the tile
+    /// room sets, and that cap follows the rail: pin the width that shows,
+    /// so a narrower rail does not widen the terminals.
+    fn pin_main_width(&self) {
+        if !self.shown.get() || self.drag_share.get().is_some() {
+            return;
+        }
+        if self.zoom_config().main_share().is_none() {
+            return;
+        }
+        let width = self.size().0;
+        let main = self.main_slot.width();
+        if width > 0 && main > 0 {
+            self.drag_share
+                .set(Some(f64::from(main) / f64::from(width)));
+        }
+    }
+
     /// Keep the terminals' share (None: the default) for every workspace
     /// and the next start.
     fn save_main_share(&self, share: Option<f64>) {
@@ -1280,6 +1307,7 @@ impl ZoomView {
             // column, with its handle on its left edge.
             self.main_handle.set_visible(false);
             self.rail.set_handle_side(HandleSide::Start);
+            self.rail.set_max_open_width(i32::MAX);
             place(&self.frame, &self.main_slot, 0, 0, 1, 1);
             place(&self.frame, &self.main_handle, 1, 0, 1, 1);
             place(&self.frame, &self.rail_holder, 2, 0, 1, 1);
@@ -1324,11 +1352,17 @@ impl ZoomView {
             self.main_slot.set_vexpand(true);
             self.main_slot
                 .set_size_request(placement.main_px.round() as i32, -1);
+            // The rail's handle may take tile room, but never the room of
+            // the last readable tile: the terminals keep their width.
+            self.rail.set_max_open_width(
+                geometry::max_rail_width(frame.width, placement.main_px, cell_width).floor() as i32,
+            );
             self.tiles_box.set_vexpand(true);
             self.scroller.set_propagate_natural_height(false);
             self.scroller.set_max_content_height(-1);
         } else {
             // The handle is hidden; GTK skips a hidden grid child.
+            self.rail.set_max_open_width(i32::MAX);
             place(&self.frame, &self.main_slot, 0, 0, 1, 1);
             place(&self.frame, &self.main_handle, 3, 0, 1, 1);
             place(&self.frame, &self.tiles_box, 0, 1, 1, 1);
