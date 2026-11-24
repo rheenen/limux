@@ -55,7 +55,7 @@ struct Workspace {
     root: gtk::Widget,
     /// Manages the split tree data model and async widget rebuild.
     split_container: Rc<SplitTreeContainer>,
-    /// The Ctrl+wheel zoom view and the plan rail of this workspace.
+    /// The plan rail and the subagent tiles of this workspace.
     zoom: Rc<ZoomView>,
     /// The sidebar row widget.
     sidebar_row: gtk::ListBoxRow,
@@ -136,7 +136,6 @@ pub(crate) struct AppState {
     new_ws_btn: gtk::Button,
     indicator_box: gtk::Box,
     indicator_scroll: gtk::ScrolledWindow,
-    zoom_bar: Rc<crate::zoom_view::bar::ZoomBar>,
     sidebar_animation: Option<adw::TimedAnimation>,
     sidebar_animation_guard: Option<crate::terminal::LayoutAnimationGuard>,
     sidebar_animation_epoch: u64,
@@ -1887,10 +1886,6 @@ pub fn build_window(app: &adw::Application) {
     // Workspace indicator pills (takes the rest of the space)
     top_bar_content.append(&indicator_scroll);
 
-    // Zoom-level buttons of the subagent view, next to the window controls.
-    let zoom_bar = Rc::new(crate::zoom_view::bar::ZoomBar::new());
-    top_bar_content.append(&zoom_bar.root);
-
     // Window controls on the right — plain buttons styled the same as top-bar
     // action buttons so hover shape matches the pane bar exactly. We skip the
     // stock gtk::WindowControls widget because Adwaita forces circular 24px
@@ -2081,7 +2076,6 @@ pub fn build_window(app: &adw::Application) {
         stack: stack.clone(),
         indicator_box: indicator_box.clone(),
         indicator_scroll,
-        zoom_bar,
         sidebar_list: sidebar_list.clone(),
         sidebar_shell: sidebar_shell.clone(),
         sidebar_handle: sidebar_handle.clone(),
@@ -2656,9 +2650,8 @@ fn register_app_actions(app: &adw::Application, state: &State) {
     }
 }
 
-/// The zoom view's window-level controls: Ctrl+wheel (CAPTURE phase, so it
-/// runs before a terminal's own scroll controller) and the "Show plan"
-/// action of the pane headers.
+/// The subagent view's window-level control: the "Show plan" action of
+/// the pane headers.
 fn install_zoom_controls(window: &adw::ApplicationWindow, state: &State) {
     let show_plan = gtk::gio::SimpleAction::new("zoom-show-plan", None);
     {
@@ -2671,181 +2664,19 @@ fn install_zoom_controls(window: &adw::ApplicationWindow, state: &State) {
         });
     }
     window.add_action(&show_plan);
-
-    let zoom_level = gtk::gio::SimpleAction::new(
-        crate::zoom_view::bar::ACTION_NAME,
-        Some(glib::VariantTy::UINT32),
-    );
-    {
-        let state = state.clone();
-        zoom_level.connect_activate(move |_, target| {
-            let level = target
-                .and_then(|v| v.get::<u32>())
-                .and_then(|i| crate::zoom_view::bar::LEVELS.get(i as usize).copied());
-            let zoom = state.borrow().active_workspace().map(|ws| ws.zoom.clone());
-            if let (Some(level), Some(zoom)) = (level, zoom) {
-                zoom.go_to(level);
-            }
-        });
-    }
-    window.add_action(&zoom_level);
-    for (name, hide_shells) in [
-        (crate::zoom_view::bar::HIDE_DONE_ACTION, false),
-        (crate::zoom_view::bar::HIDE_SHELLS_ACTION, true),
-    ] {
-        let action = gtk::gio::SimpleAction::new(name, None);
-        let state = state.clone();
-        action.connect_activate(move |_, _| {
-            let zoom = state.borrow().active_workspace().map(|ws| ws.zoom.clone());
-            if let Some(zoom) = zoom {
-                let mut filter = zoom.status().filter;
-                if hide_shells {
-                    filter.hide_shells = !filter.hide_shells;
-                } else {
-                    filter.hide_done = !filter.hide_done;
-                }
-                zoom.set_filter(filter);
-            }
-        });
-        window.add_action(&action);
-    }
-    // Every workspace switch shows another stack child: the bar follows
-    // it, also on the paths (restore, new or moved workspace) that set
-    // the active workspace without a sync.
-    {
-        let stack = state.borrow().stack.clone();
-        let weak = Rc::downgrade(state);
-        stack.connect_visible_child_notify(move |_| {
-            let weak = weak.clone();
-            glib::idle_add_local_once(move || {
-                if let Some(state) = weak.upgrade() {
-                    sync_zoom_bar(&state);
-                }
-            });
-        });
-    }
-    sync_zoom_bar(state);
-
-    // A scroll event carries no position on every backend, so the pointer
-    // position comes from a motion controller.
-    let pointer = Rc::new(Cell::new(None::<(f64, f64)>));
-    let motion = gtk::EventControllerMotion::new();
-    motion.set_propagation_phase(gtk::PropagationPhase::Capture);
-    {
-        let pointer = pointer.clone();
-        motion.connect_motion(move |_, x, y| pointer.set(Some((x, y))));
-    }
-    {
-        let pointer = pointer.clone();
-        motion.connect_enter(move |_, x, y| pointer.set(Some((x, y))));
-    }
-    window.add_controller(motion);
-
-    let scroll = gtk::EventControllerScroll::new(
-        gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE,
-    );
-    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let state = state.clone();
-    let window_widget = window.clone().upcast::<gtk::Widget>();
-    scroll.connect_scroll(move |controller, _dx, dy| {
-        if !controller
-            .current_event_state()
-            .contains(gtk::gdk::ModifierType::CONTROL_MASK)
-            || dy == 0.0
-        {
-            return glib::Propagation::Proceed;
-        }
-        let picked = pointer
-            .get()
-            .and_then(|(x, y)| window_widget.pick(x, y, gtk::PickFlags::DEFAULT));
-        let handled = picked.is_some_and(|picked| zoom_scroll(&state, &picked, dy));
-        if handled {
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(scroll);
 }
 
-/// Show the zoom level of the active workspace in the top bar.
-pub(crate) fn sync_zoom_bar(state: &State) {
-    let (bar, status, zoom_out, zoom_in) = {
-        let s = state.borrow();
-        let status = s.active_workspace().map(|ws| ws.zoom.status()).unwrap_or(
-            crate::zoom_view::view::ZoomStatus {
-                level: crate::zoom_view::geometry::ZoomLevel::Z0,
-                can_zoom: false,
-                filter: Default::default(),
-            },
-        );
-        (
-            s.zoom_bar.clone(),
-            status,
-            s.shortcuts.display_label_for_id(ShortcutId::ZoomViewOut),
-            s.shortcuts.display_label_for_id(ShortcutId::ZoomViewIn),
-        )
-    };
-    bar.sync(status, zoom_out.as_deref(), zoom_in.as_deref());
-}
-
-/// Let a workspace's zoom view update the top bar. The view calls back
-/// from inside its own code, so the sync waits for the main loop.
-fn connect_zoom_bar(state: &State, zoom: &ZoomView) {
-    let weak = Rc::downgrade(state);
-    zoom.connect_status_changed(move || {
-        let weak = weak.clone();
-        glib::idle_add_local_once(move || {
-            if let Some(state) = weak.upgrade() {
-                sync_zoom_bar(&state);
-            }
-        });
-    });
-}
-
-/// The zoom shortcuts: they act like Ctrl+wheel over the focused pane.
-fn zoom_shortcut(state: &State, out: bool) -> bool {
+/// The subagent shortcuts: show the subagents of the focused terminal's
+/// session, or hide them.
+fn zoom_shortcut(state: &State, show: bool) -> bool {
     let zoom = state.borrow().active_workspace().map(|ws| ws.zoom.clone());
     let Some(zoom) = zoom else {
         return false;
     };
-    if out {
-        zoom.zoom_out_focused()
+    if show {
+        zoom.show_subagents()
     } else {
-        zoom.zoom_in()
-    }
-}
-
-/// Ctrl+wheel over `picked`: down zooms out of the pane under the pointer,
-/// up zooms in one level and focuses the main terminal.
-fn zoom_scroll(state: &State, picked: &gtk::Widget, dy: f64) -> bool {
-    let (enabled, zoom, container, root) = {
-        let s = state.borrow();
-        let enabled = s.config.borrow().zoom_view.ctrl_wheel;
-        let Some(ws) = s.active_workspace() else {
-            return false;
-        };
-        (
-            enabled,
-            ws.zoom.clone(),
-            ws.split_container.clone(),
-            ws.root.clone(),
-        )
-    };
-    if !enabled || !picked.is_ancestor(&root) {
-        return false;
-    }
-    let mut pane = Some(picked.clone());
-    while let Some(widget) = pane.clone() {
-        if pane::is_pane_widget(&widget) && container.contains(&widget) {
-            break;
-        }
-        pane = widget.parent();
-    }
-    if dy > 0.0 {
-        zoom.zoom_out(pane.as_ref())
-    } else {
-        zoom.zoom_in()
+        zoom.hide_subagents()
     }
 }
 
@@ -3169,7 +3000,6 @@ fn apply_shortcut_config(state: &State, shortcuts: ResolvedShortcutConfig) {
 
     apply_shortcuts_to_application(&app, &shortcuts_rc);
     sync_sidebar_toggle(state);
-    sync_zoom_bar(state);
     for root in workspace_roots {
         refresh_shortcut_tooltips_in_layout(&root, &shortcuts_rc);
     }
@@ -3898,7 +3728,6 @@ struct TopBarWidgets {
     maximize: gtk::Button,
     close: gtk::Button,
     indicator_scroll: gtk::ScrolledWindow,
-    zoom_bar: gtk::Box,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
     sidebar_drag_area: gtk::Box,
@@ -3952,7 +3781,6 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             maximize,
             close,
             indicator_scroll: s.indicator_scroll.clone(),
-            zoom_bar: s.zoom_bar.root.clone(),
             sidebar_header: s.sidebar_header.clone(),
             sidebar_header_handle: s.sidebar_header_handle.clone(),
             sidebar_drag_area: s.sidebar_drag_area.clone(),
@@ -4029,7 +3857,6 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.maximize);
     detach(&widgets.close);
     detach(&widgets.indicator_scroll);
-    detach(&widgets.zoom_bar);
 
     // Clear the alt sidebar header from previous arrangements (removes the
     // leftover hexpand spacer child).
@@ -4096,7 +3923,6 @@ fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowCo
     w.content.append(&w.new_ws);
     w.content.append(&w.open_folder);
     w.content.append(&w.indicator_scroll);
-    w.content.append(&w.zoom_bar);
 
     match controls_side {
         app_config::WindowControlsSide::Left => {
@@ -5423,7 +5249,6 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
 
         let zoom = ZoomView::new(&split_container, app_state.config.clone());
-        connect_zoom_bar(state, &zoom);
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
             name: seed.name.clone(),
@@ -6148,7 +5973,6 @@ fn break_tabs_into_new_workspace(
             app_state.last_workspace_id = Some(prev_id);
         }
         let zoom = ZoomView::new(&split_container, app_state.config.clone());
-        connect_zoom_bar(state, &zoom);
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
             name: seed.name.clone(),
@@ -6706,7 +6530,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             let _ = reply.send(Ok(serde_json::json!({
                 "workspace_id": workspace.id,
                 "surface_id": surface.map(|(pane_id, tab_id)| format!("{pane_id}:{tab_id}")),
-                "level": format!("{:?}", zoom.level()),
+                "subagents_shown": zoom.subagents_shown(),
                 "rail": rail.as_str(),
                 "rail_active": rail != crate::zoom_view::config::RailState::Closed,
                 "rail_visible": zoom.rail_visible(),
@@ -7908,7 +7732,6 @@ fn add_workspace_with_initial_command(
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
     let zoom = ZoomView::new(&split_container, state.borrow().config.clone());
-    connect_zoom_bar(state, &zoom);
     let ws = Workspace {
         id,
         name: workspace.name.clone(),
@@ -8477,7 +8300,6 @@ fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool
     // If the dock toggle is parked on a pane (top-bar off, sidebar closed),
     // move it to the new active workspace's leading pane.
     apply_top_bar_mode(state);
-    sync_zoom_bar(state);
     request_session_save(state);
 }
 

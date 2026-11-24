@@ -171,7 +171,7 @@ pub fn format_elapsed(ms: u64) -> String {
     }
 }
 
-/// The top-bar filters of the zoom view (per workspace).
+/// The filters at the top of the subagent pane (kept in settings.json).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunFilter {
     /// Hide finished subagents and shells.

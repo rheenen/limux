@@ -1,8 +1,11 @@
-//! The zoom view of one workspace: Ctrl+wheel down on a terminal folds
-//! the other splits away and shows the session's subagents as live tiles
-//! beside it; the plan rail is on every level. Ctrl+wheel up steps back
-//! to Z0 and focuses the main terminal; a double-click on a tile opens
-//! that run as a new tab in the same pane, at the same zoom level.
+//! The subagent view of one workspace. The splits always stay. Beside
+//! them is the /dip plan rail when the focused terminal's session has a
+//! plan. The rail's "Subagents" button shows that session's subagents as
+//! live tiles to the right of the rail; "Hide subagents" hides them. The
+//! top of the subagent pane has the "Hide done" and "Hide shells" filters
+//! (kept in settings.json) and a close button that hides the pane. A
+//! double-click on a tile opens its run as a new tab in the session's
+//! pane.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -16,7 +19,7 @@ use gtk4 as gtk;
 
 use super::config::{RailState, ZoomLayout, ZoomViewConfig};
 use super::dip_state::{self, DipState, Run, RunFilter, RunStatus};
-use super::geometry::{self, Frame, ZoomLevel};
+use super::geometry::{self, Frame};
 use super::rail::{HandleSide, PlanRail};
 use crate::app_config::AppConfig;
 use crate::pane;
@@ -24,7 +27,8 @@ use crate::split_tree::SplitTreeContainer;
 use crate::terminal::{self, TerminalCallbacks, TerminalOptions, TerminalWidget};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// The drag handle between the main terminal and the rail or tiles.
+/// The drag handle between the terminals and the rail while the tiles
+/// show.
 const MAIN_HANDLE_WIDTH: i32 = 6;
 const TILE_NAME_PREFIX: &str = "limux-zoom-tile:";
 const TILE_TITLE_HEIGHT: i32 = 24;
@@ -39,8 +43,8 @@ struct Tile {
     follow: Vec<String>,
 }
 
-/// The title bar of a terminal card: status icon, name, model, then the
-/// elapsed time (or the size) at the right. It has no buttons.
+/// The title bar of a tile: status icon, name, model, then the elapsed
+/// time at the right. It has no buttons.
 struct CardTitle {
     root: gtk::Box,
     glyph: gtk::Label,
@@ -136,22 +140,26 @@ pub struct ZoomView {
     container: Weak<SplitTreeContainer>,
     config: Rc<RefCell<AppConfig>>,
     frame: gtk::Grid,
+    /// Holds the split tree.
     main_slot: gtk::Box,
-    main_title: CardTitle,
-    show_plan: gtk::Button,
     rail_holder: gtk::Box,
-    /// The drag handle on the main card's right edge (focus and grid
-    /// layouts): it sets the main terminal's share of the width.
+    /// The drag handle on the terminals' right edge while the tiles show
+    /// (focus and grid layouts): it sets the terminals' share of the
+    /// width.
     main_handle: gtk::Box,
     tiles_box: gtk::Box,
     tiles_header: gtk::Label,
+    hide_done: gtk::ToggleButton,
+    hide_shells: gtk::ToggleButton,
     scroller: gtk::ScrolledWindow,
     grid: gtk::Grid,
     empty: gtk::Label,
     indicator: gtk::Label,
     rail: Rc<PlanRail>,
-    level: Cell<ZoomLevel>,
-    /// The session shown while zoomed (fixed) or at Z0 (follows focus).
+    /// The subagent tiles show.
+    shown: Cell<bool>,
+    /// The session of the rail and the tiles. It follows the keyboard
+    /// focus while the tiles are hidden, and stays while they show.
     session: RefCell<Option<Session>>,
     loaded: RefCell<Option<LoadedState>>,
     tiles: RefCell<Vec<Tile>>,
@@ -160,9 +168,6 @@ pub struct ZoomView {
     tile_height: Cell<f64>,
     grid_columns: Cell<u32>,
     timer: RefCell<Option<glib::SourceId>>,
-    /// Called when `status()` changes (the top bar follows it).
-    on_change: RefCell<Option<Rc<dyn Fn()>>>,
-    last_status: Cell<Option<ZoomStatus>>,
     /// The saved rail width this view last applied; another workspace's
     /// drag changes the setting, and the poll then follows it.
     applied_rail_width: Cell<u32>,
@@ -170,18 +175,11 @@ pub struct ZoomView {
     promoted: RefCell<HashMap<String, String>>,
     /// The tile font size and the font generation it was applied for.
     applied_tile_font: Cell<(f32, u64)>,
+    /// The filters this view applies; the poll follows the saved ones,
+    /// which another workspace may change.
     filter: Cell<RunFilter>,
     /// The share while the main handle is dragged; saved when it ends.
     drag_share: Cell<Option<f64>>,
-}
-
-/// What the top-bar zoom buttons show for a workspace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZoomStatus {
-    pub level: ZoomLevel,
-    /// True when a zoom-out has something to show (or the view is zoomed).
-    pub can_zoom: bool,
-    pub filter: RunFilter,
 }
 
 fn now_ms() -> u64 {
@@ -212,6 +210,21 @@ fn place(
     layout_child.set_row_span(height);
 }
 
+/// A filter toggle at the top of the subagent pane: icon and label.
+fn filter_button(label: &str, icon: &str, active: bool) -> gtk::ToggleButton {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.append(&gtk::Image::from_icon_name(icon));
+    content.append(&gtk::Label::new(Some(label)));
+    let button = gtk::ToggleButton::new();
+    button.set_child(Some(&content));
+    button.set_active(active);
+    button.add_css_class("flat");
+    button.add_css_class("limux-zoom-filter");
+    button.set_focus_on_click(false);
+    button.set_valign(gtk::Align::Center);
+    button
+}
+
 fn install_css() {
     thread_local! {
         static INSTALLED: Cell<bool> = const { Cell::new(false) };
@@ -223,22 +236,32 @@ fn install_css() {
         return;
     };
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(
-        ".limux-plan-rail { border-left: 1px solid alpha(currentColor, 0.12); }\n\
-         .limux-plan-rail-handle { background: transparent; }\n\
-         .limux-plan-rail-handle:hover { background: alpha(currentColor, 0.15); }\n\
-         .limux-zoom-main-handle { background: transparent; }\n\
-         .limux-zoom-main-handle:hover { background: alpha(currentColor, 0.15); }\n\
+    provider.load_from_data(VIEW_CSS);
+    gtk::style_context_add_provider_for_display(&display, &provider, super::CSS_PRIORITY);
+}
+
+/// The CSS of the view. Every pane is a card with rounded corners; the
+/// pane with the keyboard focus has a blue edge. The drag handles show a
+/// light gray line, so the edge between the rail and the tiles is
+/// visible.
+const VIEW_CSS: &str = "\
+         .limux-plan-strip { border-left: 1px solid alpha(currentColor, 0.12); border-right: 1px solid alpha(currentColor, 0.12); }\n\
+         .limux-plan-rail-handle, .limux-zoom-main-handle { background: linear-gradient(to right, transparent 2px, #c8c8c8 2px, #c8c8c8 4px, transparent 4px); }\n\
+         .limux-plan-rail-handle:hover, .limux-zoom-main-handle:hover { background: alpha(#c8c8c8, 0.6); }\n\
          .limux-plan-strip-count { font-weight: bold; font-size: 0.9em; }\n\
-         .limux-zoom-tile, .limux-zoom-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
-         .limux-zoom-card { border-color: alpha(#6aa6ff, 0.55); margin: 4px 0 4px 4px; }\n\
+         .limux-zoom-tile, .limux-pane-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
+         .limux-pane-card { margin: 3px; }\n\
+         .limux-pane-card:focus-within { border-color: alpha(#6aa6ff, 0.55); }\n\
+         .limux-zoom-pane-header { margin-bottom: 2px; }\n\
+         .limux-zoom-filter { padding: 0 8px; min-height: 24px; font-size: 0.85em; }\n\
+         .limux-zoom-filter:checked { background: alpha(#6aa6ff, 0.3); color: @window_fg_color; }\n\
+         .limux-zoom-pane-close { min-height: 0; min-width: 0; padding: 2px; }\n\
          .limux-zoom-tile-done { opacity: 0.6; }\n\
          .limux-zoom-tile-selected { border: 2px solid #f0b45e; }\n\
          .limux-zoom-card-title { padding: 0 10px; font-size: 0.9em; background: alpha(currentColor, 0.05); border-bottom: 1px solid alpha(currentColor, 0.1); }\n\
          .limux-zoom-card-glyph { font-weight: bold; }\n\
          .limux-zoom-card-name { font-weight: 600; }\n\
          .limux-zoom-card-end { font-family: monospace; }\n\
-         .limux-zoom-card-plan { padding: 0 8px; min-height: 20px; font-size: 0.9em; }\n\
          .limux-plan-rail-summary { font-size: 0.85em; }\n\
          .limux-plan-rail-list > row { min-height: 0; padding-top: 1px; padding-bottom: 1px; margin-top: 0; margin-bottom: 0; }\n\
          .limux-zoom-st-running { color: #e5c07b; }\n\
@@ -247,10 +270,7 @@ fn install_css() {
          .limux-zoom-st-limit { color: #d68ae6; }\n\
          .limux-zoom-st-stopped { color: alpha(currentColor, 0.55); }\n\
          .limux-zoom-st-taken-over { color: #56c8d8; }\n\
-         .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n",
-    );
-    gtk::style_context_add_provider_for_display(&display, &provider, super::CSS_PRIORITY);
-}
+         .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n";
 
 impl ZoomView {
     pub fn new(container: &Rc<SplitTreeContainer>, config: Rc<RefCell<AppConfig>>) -> Rc<Self> {
@@ -266,21 +286,10 @@ impl ZoomView {
         frame.set_vexpand(true);
         frame.set_column_spacing(0);
         frame.set_row_spacing(0);
-        // The main terminal card: its title bar, then the pane (the split
-        // tree appends it while zoomed).
+        // The split tree goes in here (`mount_in_frame`).
         let main_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main_slot.set_hexpand(true);
         main_slot.set_vexpand(true);
-        main_slot.add_css_class("limux-zoom-card");
-        main_slot.set_overflow(gtk::Overflow::Hidden);
-        let main_title = CardTitle::new();
-        let show_plan = gtk::Button::with_label("Show plan");
-        show_plan.add_css_class("limux-zoom-card-plan");
-        show_plan.set_action_name(Some("win.zoom-show-plan"));
-        show_plan.set_focus_on_click(false);
-        show_plan.set_valign(gtk::Align::Center);
-        show_plan.set_visible(false);
-        main_title.root.append(&show_plan);
-        main_slot.append(&main_title.root);
         let rail_holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
         rail_holder.set_vexpand(true);
         rail_holder.set_hexpand(false);
@@ -293,7 +302,34 @@ impl ZoomView {
         tiles_box.set_margin_top(4);
         let tiles_header = gtk::Label::new(None);
         tiles_header.set_xalign(0.0);
+        tiles_header.set_hexpand(true);
+        tiles_header.set_ellipsize(gtk::pango::EllipsizeMode::End);
         tiles_header.add_css_class("dim-label");
+        let filter = config.borrow().zoom_view.filter();
+        let hide_done = filter_button(
+            super::filters::HIDE_DONE_LABEL,
+            "object-select-symbolic",
+            filter.hide_done,
+        );
+        let hide_shells = filter_button(
+            super::filters::HIDE_SHELLS_LABEL,
+            "utilities-terminal-symbolic",
+            filter.hide_shells,
+        );
+        let close_pane = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Hide the subagents")
+            .has_frame(false)
+            .valign(gtk::Align::Center)
+            .focus_on_click(false)
+            .build();
+        close_pane.add_css_class("limux-zoom-pane-close");
+        let pane_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        pane_header.add_css_class("limux-zoom-pane-header");
+        pane_header.append(&tiles_header);
+        pane_header.append(&hide_done);
+        pane_header.append(&hide_shells);
+        pane_header.append(&close_pane);
         let grid = gtk::Grid::new();
         grid.set_column_spacing(geometry::TILE_GAP as u32);
         grid.set_row_spacing(geometry::TILE_GAP as u32);
@@ -311,7 +347,7 @@ impl ZoomView {
         indicator.add_css_class("limux-zoom-indicator");
         indicator.add_css_class("dim-label");
         indicator.set_visible(false);
-        tiles_box.append(&tiles_header);
+        tiles_box.append(&pane_header);
         tiles_box.append(&scroller);
         tiles_box.append(&empty);
         tiles_box.append(&indicator);
@@ -323,8 +359,10 @@ impl ZoomView {
         main_handle.set_hexpand(false);
         main_handle.set_cursor_from_name(Some("col-resize"));
         main_handle.set_tooltip_text(Some(
-            "Drag to change the width of the terminal and the subagents.\nDouble-click for the default width of this zoom level.",
+            "Drag to change the width of the terminals and the subagents.\nDouble-click for the default width.",
         ));
+        main_handle.set_visible(false);
+        tiles_box.set_visible(false);
 
         frame.attach(&main_slot, 0, 0, 1, 1);
         frame.attach(&main_handle, 1, 0, 1, 1);
@@ -336,18 +374,18 @@ impl ZoomView {
             config,
             frame,
             main_slot,
-            main_title,
-            show_plan,
             rail_holder,
             main_handle,
             tiles_box,
             tiles_header,
+            hide_done,
+            hide_shells,
             scroller,
             grid,
             empty,
             indicator,
             rail,
-            level: Cell::new(ZoomLevel::Z0),
+            shown: Cell::new(false),
             session: RefCell::new(None),
             loaded: RefCell::new(None),
             tiles: RefCell::default(),
@@ -356,24 +394,15 @@ impl ZoomView {
             tile_height: Cell::new(0.0),
             grid_columns: Cell::new(1),
             timer: RefCell::new(None),
-            on_change: RefCell::new(None),
-            last_status: Cell::new(None),
             applied_rail_width: Cell::new(rail_width),
             promoted: RefCell::default(),
             applied_tile_font: Cell::new((0.0, 0)),
-            filter: Cell::new(RunFilter::default()),
+            filter: Cell::new(filter),
             drag_share: Cell::new(None),
         });
 
-        container.rail_slot().append(&view.rail.root);
-        {
-            let weak = Rc::downgrade(&view);
-            container.set_on_frame_dropped(move || {
-                if let Some(view) = weak.upgrade() {
-                    view.frame_dropped();
-                }
-            });
-        }
+        view.rail_holder.append(&view.rail.root);
+        container.mount_in_frame(view.frame.upcast_ref(), &view.main_slot);
         {
             let weak = Rc::downgrade(&view);
             view.rail.connect_select_run(move |run| {
@@ -386,7 +415,7 @@ impl ZoomView {
             let weak = Rc::downgrade(&view);
             view.rail.connect_zoom(move || {
                 if let Some(view) = weak.upgrade() {
-                    view.show_subagents();
+                    view.toggle_subagents();
                 }
             });
             let weak = Rc::downgrade(&view);
@@ -400,9 +429,7 @@ impl ZoomView {
             let weak = Rc::downgrade(&view);
             view.rail.connect_width_changed(move |width, done| {
                 let Some(view) = weak.upgrade() else { return };
-                if view.level.get().is_zoomed() {
-                    view.relayout();
-                }
+                view.relayout();
                 if done {
                     view.save_rail_width(width);
                 }
@@ -418,6 +445,28 @@ impl ZoomView {
             });
         }
         view.connect_main_handle();
+        for (button, shells) in [(&view.hide_done, false), (&view.hide_shells, true)] {
+            let weak = Rc::downgrade(&view);
+            button.connect_toggled(move |button| {
+                let Some(view) = weak.upgrade() else { return };
+                let mut filter = view.filter.get();
+                if shells {
+                    filter.hide_shells = button.is_active();
+                } else {
+                    filter.hide_done = button.is_active();
+                }
+                view.set_filter(filter);
+            });
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            close_pane.connect_clicked(move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.hide_subagents();
+                }
+            });
+        }
+        view.sync_filter_buttons();
         {
             let weak = Rc::downgrade(&view);
             view.scroller.vadjustment().connect_value_changed(move |_| {
@@ -443,8 +492,8 @@ impl ZoomView {
         self.config.borrow().zoom_view
     }
 
-    pub fn level(&self) -> ZoomLevel {
-        self.level.get()
+    pub fn subagents_shown(&self) -> bool {
+        self.shown.get()
     }
 
     pub fn rail_mode(&self) -> RailState {
@@ -455,50 +504,71 @@ impl ZoomView {
         self.rail.root.is_visible()
     }
 
-    pub fn status(&self) -> ZoomStatus {
-        let level = self.level.get();
-        ZoomStatus {
-            level,
-            can_zoom: super::bar::can_zoom(level, self.current_state().as_ref()),
-            filter: self.filter.get(),
-        }
-    }
-
-    /// The session has a plan or runs: the rail shows them, and the zoom
-    /// levels open even before a subagent starts.
+    /// The session has a plan or runs: the rail shows them, and the
+    /// subagents button shows, also before a subagent starts.
     fn has_plan(&self) -> bool {
-        super::bar::can_zoom(ZoomLevel::Z0, self.current_state().as_ref())
+        super::filters::has_content(self.current_state().as_ref())
     }
 
-    /// The top-bar filters changed: tiles and rail follow them.
-    pub fn set_filter(self: &Rc<Self>, filter: RunFilter) {
+    /// A filter button changed: tiles and rail follow it, and the choice
+    /// is saved for every workspace and the next start.
+    fn set_filter(self: &Rc<Self>, filter: RunFilter) {
         if self.filter.replace(filter) == filter {
             return;
         }
+        self.save_filter(filter);
+        self.sync_filter_buttons();
         self.state_changed();
-        if !self.level.get().is_zoomed() {
-            self.sync_tiles();
+    }
+
+    /// Another workspace changed the saved filters: follow them.
+    fn follow_saved_filter(self: &Rc<Self>) {
+        let saved = self.config.borrow().zoom_view.filter();
+        if self.filter.replace(saved) != saved {
+            self.sync_filter_buttons();
+            self.state_changed();
         }
-        self.notify_status();
     }
 
-    /// `callback` runs when `status()` changes. It runs from inside the
-    /// view, so it must not borrow state that the caller holds; defer.
-    pub fn connect_status_changed(&self, callback: impl Fn() + 'static) {
-        *self.on_change.borrow_mut() = Some(Rc::new(callback));
+    fn sync_filter_buttons(&self) {
+        let filter = self.filter.get();
+        for (button, on, hint) in [
+            (
+                &self.hide_done,
+                filter.hide_done,
+                super::filters::hide_done_hint(filter.hide_done),
+            ),
+            (
+                &self.hide_shells,
+                filter.hide_shells,
+                super::filters::hide_shells_hint(filter.hide_shells),
+            ),
+        ] {
+            // `set_active` to the same value emits nothing, so a toggle
+            // does not come back here.
+            button.set_active(on);
+            button.set_tooltip_text(Some(hint));
+        }
     }
 
+    fn save_filter(&self, filter: RunFilter) {
+        let snapshot = {
+            let mut config = self.config.borrow_mut();
+            if config.zoom_view.filter() == filter {
+                return;
+            }
+            config.zoom_view.set_filter(filter);
+            config.clone()
+        };
+        if let Err(err) = crate::app_config::save(&snapshot) {
+            eprintln!("limux: zoom view: cannot save the subagent filters: {err}");
+        }
+    }
+
+    /// The rail's subagents button follows the plan and the tiles.
     fn notify_status(&self) {
-        let status = self.status();
         self.rail
-            .set_zoom_button_visible(!status.level.is_zoomed() && status.can_zoom);
-        if self.last_status.replace(Some(status)) == Some(status) {
-            return;
-        }
-        let callback = self.on_change.borrow().clone();
-        if let Some(callback) = callback {
-            callback();
-        }
+            .set_subagents_button(self.has_plan(), self.shown.get());
     }
 
     pub fn show_rail(&self) {
@@ -517,7 +587,9 @@ impl ZoomView {
 
     /// The settings changed: apply the layout and the finished-tile filter.
     pub fn apply_config(self: &Rc<Self>) {
-        self.sync_tiles();
+        if self.shown.get() {
+            self.sync_tiles();
+        }
         self.relayout();
     }
 
@@ -632,25 +704,36 @@ impl ZoomView {
         let state = self.current_state().map(|state| state.filtered(filter));
         self.rail.update(state.as_ref());
         self.sync_show_buttons();
-        if self.level.get().is_zoomed() {
-            self.sync_tiles();
-            self.relayout();
-        } else {
+        if !self.shown.get() {
             self.prune_tiles(&self.tile_runs());
+            return;
         }
+        // The plan and the runs are gone (the session ended): the tiles
+        // hide, and the splits get the space back.
+        if !self.has_plan() {
+            self.set_shown(false);
+            return;
+        }
+        self.sync_tiles();
+        self.relayout();
     }
 
     fn poll(self: &Rc<Self>) {
         self.follow_saved_rail_width();
+        self.follow_saved_filter();
         self.follow_tile_font();
-        if !self.level.get().is_zoomed() {
+        if self.shown.get() && !self.session_pane_alive() {
+            // The session's pane closed: its tiles go with it.
+            self.set_shown(false);
+        }
+        if !self.shown.get() {
             if let Some(pane) = self.focused_pane() {
                 let session = self.session_for_pane(&pane);
                 self.set_session(session);
             }
         }
         self.reload();
-        if self.level.get().is_zoomed() {
+        if self.shown.get() {
             let size = self.size();
             if size != self.last_size.get() {
                 self.relayout();
@@ -658,6 +741,17 @@ impl ZoomView {
             self.sync_titles();
         }
         self.notify_status();
+    }
+
+    /// The session's pane is still in this workspace.
+    fn session_pane_alive(&self) -> bool {
+        let Some(container) = self.container.upgrade() else {
+            return false;
+        };
+        self.session
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| container.contains(&session.pane))
     }
 
     /// The tile font size (two points below the terminal font) and the
@@ -687,18 +781,15 @@ impl ZoomView {
         if self.applied_rail_width.replace(saved) != saved && self.rail.open_width() != saved as i32
         {
             self.rail.set_open_width(saved as i32);
-            if self.level.get().is_zoomed() {
-                self.relayout();
-            }
+            self.relayout();
         }
     }
 
-    /// The main handle: a drag moves the main card's right edge (live),
-    /// its end saves the share for this zoom level, and a double-click
-    /// goes back to the level's default.
+    /// The main handle: a drag moves the terminals' right edge (live), its
+    /// end saves the share, and a double-click goes back to the default.
     fn connect_main_handle(self: &Rc<Self>) {
         let drag = gtk::GestureDrag::new();
-        // The main card's width and the pointer's window x at the start.
+        // The terminals' width and the pointer's window x at the start.
         let start = Rc::new(Cell::new((0.0, 0.0)));
         {
             let weak = Rc::downgrade(self);
@@ -752,14 +843,13 @@ impl ZoomView {
         self.main_handle.add_controller(click);
     }
 
-    /// Keep the main terminal's share for the current zoom level (None:
-    /// the default) for every workspace and the next start.
+    /// Keep the terminals' share (None: the default) for every workspace
+    /// and the next start.
     fn save_main_share(&self, share: Option<f64>) {
-        let level = self.level.get();
         let snapshot = {
             let mut config = self.config.borrow_mut();
             let before = config.zoom_view.main_share_permille;
-            config.zoom_view.set_main_share(level, share);
+            config.zoom_view.set_main_share(share);
             if config.zoom_view.main_share_permille == before {
                 return;
             }
@@ -809,8 +899,8 @@ impl ZoomView {
         let Some(container) = self.container.upgrade() else {
             return;
         };
-        // Only the pane of the session gets the button: the plan belongs
-        // to that terminal, not to its neighbours.
+        // Only the pane of the session gets the "Show plan" button: the
+        // plan belongs to that terminal, not to its neighbours.
         let session_pane = self
             .session
             .borrow()
@@ -822,8 +912,6 @@ impl ZoomView {
                 button.set_visible(session_pane.as_ref() == Some(&pane));
             }
         }
-        // While zoomed the pane header hides; the card title has the button.
-        self.show_plan.set_visible(session_pane.is_some());
     }
 
     // -- Tiles ----------------------------------------------------------
@@ -946,8 +1034,8 @@ impl ZoomView {
         self.sync_titles();
     }
 
-    /// The elapsed times of the tiles and the main card's title. The poll
-    /// calls it, so the times move on.
+    /// The elapsed times of the tiles. The poll calls it, so the times
+    /// move on.
     fn sync_titles(&self) {
         let state = self.current_state();
         let now = now_ms();
@@ -958,26 +1046,6 @@ impl ZoomView {
                     .set_label(&run.elapsed_label(now).unwrap_or_default());
             }
         }
-        let Some(session) = self.session.borrow().clone() else {
-            return;
-        };
-        Self::sync_pane_header(&session.pane);
-        let summary = pane::active_surface_summary(&session.pane);
-        let name = summary
-            .as_ref()
-            .map(|s| s.title.clone())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "Terminal".to_string());
-        let plan = state
-            .as_ref()
-            .and_then(|s| s.plan.as_ref())
-            .map(|p| p.title.clone());
-        let size = pane::terminal_handle_for_surface(&session.pane, None)
-            .map(|(_, handle)| handle.health())
-            .filter(|h| h.columns > 0)
-            .map(|h| format!("{} × {}", h.columns, h.rows));
-        self.main_title
-            .set(RunStatus::Running, &name, plan.as_deref(), size.as_deref());
     }
 
     pub fn select(&self, run_id: Option<String>) {
@@ -1013,98 +1081,61 @@ impl ZoomView {
         }
     }
 
-    // -- Zoom steps -----------------------------------------------------
+    // -- Show and hide --------------------------------------------------
 
-    /// Ctrl+wheel down over `pane` (a pane of this workspace). Returns
-    /// false when there is nothing to zoom to, so the wheel goes to the
-    /// terminal as before.
-    pub fn zoom_out(self: &Rc<Self>, pane: Option<&gtk::Widget>) -> bool {
-        let Some(container) = self.container.upgrade() else {
-            return false;
-        };
-        let level = self.level.get();
-        if level.is_zoomed() {
-            self.set_level(level.out());
+    /// The rail's subagents button: show the tiles, or hide them.
+    fn toggle_subagents(self: &Rc<Self>) {
+        if self.shown.get() {
+            self.hide_subagents();
+        } else {
+            self.show_subagents();
+        }
+    }
+
+    /// Show the subagents of the session as tiles to the right of the
+    /// rail. Returns false when the session has no plan and no runs.
+    pub fn show_subagents(self: &Rc<Self>) -> bool {
+        if self.shown.get() {
             return true;
         }
-        let Some(pane) = pane else {
-            return false;
-        };
-        let Some(session) = self.session_for_pane(pane) else {
-            return false;
-        };
-        self.set_session(Some(session));
+        // The session of the focused pane, when it has one; else the
+        // session that the rail shows now.
+        if let Some(session) = self
+            .focused_pane()
+            .and_then(|pane| self.session_for_pane(&pane))
+        {
+            self.set_session(Some(session));
+        }
         self.reload();
         if !self.has_plan() {
             return false;
         }
-        // Move the rail into the frame, then show the frame.
-        if let Some(parent) = self.rail.root.parent().and_downcast::<gtk::Box>() {
-            parent.remove(&self.rail.root);
-        }
-        self.rail_holder.append(&self.rail.root);
-        if !container.enter_zoom_frame(pane, self.frame.clone().upcast(), self.main_slot.clone()) {
-            self.return_rail(&container);
+        self.set_shown(true);
+        true
+    }
+
+    /// Hide the tiles: the splits get the space back. The tiles keep
+    /// their surfaces; they are unmapped, so they stop drawing.
+    pub fn hide_subagents(self: &Rc<Self>) -> bool {
+        if !self.shown.get() {
             return false;
         }
-        self.level.set(ZoomLevel::Z1);
-        Self::sync_pane_header(pane);
-        self.sync_tiles();
+        self.set_shown(false);
+        self.focus_main();
+        true
+    }
+
+    fn set_shown(self: &Rc<Self>, shown: bool) {
+        self.shown.set(shown);
+        if shown {
+            self.sync_tiles();
+        } else {
+            *self.selected.borrow_mut() = None;
+            self.sync_selection();
+            self.drag_share.set(None);
+        }
         self.relayout();
         self.notify_status();
-        true
-    }
-
-    /// The zoom-out shortcut: zoom out of the focused pane (or one more
-    /// step when the view is zoomed already).
-    pub fn zoom_out_focused(self: &Rc<Self>) -> bool {
-        let pane = self.focused_pane();
-        self.zoom_out(pane.as_ref())
-    }
-
-    /// A top-bar level button: go straight to `target`. Z0 returns to the
-    /// splits; a deeper level zooms out of the focused pane
-    /// first. Returns false when there is nothing to zoom to.
-    pub fn go_to(self: &Rc<Self>, target: ZoomLevel) -> bool {
-        let level = self.level.get();
-        if target == level {
-            return true;
-        }
-        if !target.is_zoomed() {
-            self.leave();
-            return true;
-        }
-        if !level.is_zoomed() && !self.zoom_out_focused() {
-            return false;
-        }
-        self.set_level(target);
-        true
-    }
-
-    /// Ctrl+wheel up: one level in, from Z1 back to Z0. The selected tile
-    /// does not matter; the main terminal gets the keyboard focus.
-    pub fn zoom_in(self: &Rc<Self>) -> bool {
-        let level = self.level.get();
-        if !level.is_zoomed() {
-            return false;
-        }
-        if level > ZoomLevel::Z1 {
-            self.set_level(level.r#in());
-        } else {
-            self.leave();
-        }
-        self.focus_main();
-        true
-    }
-
-    /// The rail's "Subagents" button: zoom out of the session's pane to
-    /// Z1, with the keyboard focus on its terminal.
-    fn show_subagents(self: &Rc<Self>) {
-        let pane = self.session.borrow().as_ref().map(|s| s.pane.clone());
-        if self.level.get().is_zoomed() || !self.zoom_out(pane.as_ref()) {
-            return;
-        }
-        self.focus_main();
     }
 
     /// The keyboard focus to the session's terminal.
@@ -1118,7 +1149,7 @@ impl ZoomView {
     }
 
     /// A double-click on a tile: the run opens as a new tab in the
-    /// session's pane, and the zoom level stays.
+    /// session's pane. The tiles stay.
     fn open_in_tab(self: &Rc<Self>, run_id: &str) {
         let Some(run) = self
             .current_state()
@@ -1126,71 +1157,10 @@ impl ZoomView {
         else {
             return;
         };
-        // The zoom level stays: the tab opens in the main terminal's pane,
-        // and the pane header comes back so the tabs can be switched.
         let session = self.session.borrow().clone();
         if let Some(session) = session {
             self.promote(&session, &run);
-            if self.level.get().is_zoomed() {
-                Self::sync_pane_header(&session.pane);
-            }
         }
-    }
-
-    /// While zoomed, the card title replaces the pane header. A pane with
-    /// more than one tab keeps its header, so its tabs stay reachable.
-    fn sync_pane_header(pane: &gtk::Widget) {
-        pane::set_pane_header_visible(pane, pane::tab_count_in_pane(pane) > 1);
-    }
-
-    fn set_level(&self, level: ZoomLevel) {
-        if self.level.replace(level) != level {
-            self.relayout();
-        }
-        self.notify_status();
-    }
-
-    /// Every pane header back (the zoomed pane may have moved meanwhile).
-    fn show_pane_headers(container: &SplitTreeContainer) {
-        for pane in container.panes() {
-            pane::set_pane_header_visible(&pane, true);
-        }
-    }
-
-    fn return_rail(&self, container: &SplitTreeContainer) {
-        if let Some(parent) = self.rail.root.parent().and_downcast::<gtk::Box>() {
-            parent.remove(&self.rail.root);
-        }
-        container.rail_slot().append(&self.rail.root);
-        // Beside the splits the rail is the rightmost column.
-        self.rail.set_handle_side(HandleSide::Start);
-    }
-
-    /// Back to Z0: the splits return. The tiles keep their surfaces; they
-    /// are unmapped, so they stop drawing.
-    fn leave(&self) {
-        self.level.set(ZoomLevel::Z0);
-        *self.selected.borrow_mut() = None;
-        self.sync_selection();
-        if let Some(container) = self.container.upgrade() {
-            self.return_rail(&container);
-            Self::show_pane_headers(&container);
-            container.leave_zoom_frame();
-        }
-        self.notify_status();
-    }
-
-    /// The split container dropped the frame (a split, a close, or the
-    /// pane-zoom toggle).
-    fn frame_dropped(&self) {
-        self.level.set(ZoomLevel::Z0);
-        *self.selected.borrow_mut() = None;
-        self.sync_selection();
-        if let Some(container) = self.container.upgrade() {
-            self.return_rail(&container);
-            Self::show_pane_headers(&container);
-        }
-        self.notify_status();
     }
 
     /// The tab runs the run's `chat` argv, or `follow` when `chat` is null.
@@ -1234,7 +1204,18 @@ impl ZoomView {
     }
 
     fn relayout(&self) {
-        if !self.level.get().is_zoomed() {
+        self.tiles_box.set_visible(self.shown.get());
+        if !self.shown.get() {
+            // The splits take all the width; the rail is the rightmost
+            // column, with its handle on its left edge.
+            self.main_handle.set_visible(false);
+            self.rail.set_handle_side(HandleSide::Start);
+            place(&self.frame, &self.main_slot, 0, 0, 1, 1);
+            place(&self.frame, &self.main_handle, 1, 0, 1, 1);
+            place(&self.frame, &self.rail_holder, 2, 0, 1, 1);
+            place(&self.frame, &self.tiles_box, 3, 0, 1, 1);
+            self.main_slot.set_hexpand(true);
+            self.main_slot.set_size_request(-1, -1);
             return;
         }
         let config = self.zoom_config();
@@ -1248,15 +1229,11 @@ impl ZoomView {
             cell_height,
             rail_width: self.rail.width(),
             main_min_columns: config.main_min_columns,
-            main_share: self
-                .drag_share
-                .get()
-                .or_else(|| config.main_share(self.level.get())),
+            main_share: self.drag_share.get().or_else(|| config.main_share()),
         };
-        let level = self.level.get();
-        let placement = geometry::place(config.layout, frame, level);
-
         let tiles = self.tiles.borrow();
+        let placement = geometry::place(config.layout, frame, tiles.len() as u32);
+
         let tile_px_height = (f64::from(placement.tile_rows) * cell_height).round() as i32;
         let side_by_side = matches!(config.layout, ZoomLayout::Focus | ZoomLayout::Grid);
         self.main_handle.set_visible(side_by_side);
@@ -1370,11 +1347,8 @@ impl ZoomView {
                     .is_some_and(|run| run.status.is_running())
             })
             .count();
-        let level_name = format!("{level:?}");
-        self.tiles_header.set_label(&format!(
-            "{} subagents · {running} running · {level_name}",
-            tiles.len()
-        ));
+        self.tiles_header
+            .set_label(&format!("{} subagents · {running} running", tiles.len()));
         let has_tiles = !tiles.is_empty();
         drop(tiles);
         self.scroller.set_visible(has_tiles);

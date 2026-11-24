@@ -530,6 +530,10 @@ pub fn create_pane(
         .vexpand(true)
         .build();
     outer.set_size_request(MIN_PANE_WIDTH, MIN_PANE_HEIGHT);
+    // A card with rounded corners (CSS in the subagent view); the clip
+    // keeps the terminal inside the corners.
+    outer.add_css_class("limux-pane-card");
+    outer.set_overflow(gtk::Overflow::Hidden);
 
     // The single header line: [leading slot] tabs (left) + action icons (right)
     let header = gtk::Box::builder()
@@ -639,7 +643,7 @@ pub fn create_pane(
         &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
     );
 
-    // Hidden until the zoom view has a closed plan rail to bring back.
+    // Hidden until the subagent view has a closed plan rail to bring back.
     let plan_btn = icon_button("view-list-bullet-symbolic", "Show plan");
     plan_btn.set_action_name(Some("win.zoom-show-plan"));
     plan_btn.set_visible(false);
@@ -2912,27 +2916,6 @@ pub fn pane_leading_box(pane_widget: &gtk::Widget) -> Option<gtk::Box> {
 /// leaves the widget in the old tree until the next frame.
 pub fn is_live_pane(widget: &gtk::Widget) -> bool {
     find_pane_internals(widget).is_some()
-}
-
-/// Show or hide the pane header (tabs and pane buttons). The zoom view
-/// hides it while the pane is its main terminal card.
-pub fn set_pane_header_visible(pane_widget: &gtk::Widget, visible: bool) {
-    let Some(container) = pane_widget.downcast_ref::<gtk::Box>() else {
-        return;
-    };
-    let mut child = container.first_child();
-    while let Some(current) = child {
-        let is_header = current.has_css_class("limux-pane-header")
-            || current
-                .downcast_ref::<gtk::WindowHandle>()
-                .and_then(|handle| handle.child())
-                .is_some_and(|inner| inner.has_css_class("limux-pane-header"));
-        if is_header {
-            current.set_visible(visible);
-            return;
-        }
-        child = current.next_sibling();
-    }
 }
 
 pub fn is_pane_widget(widget: &gtk::Widget) -> bool {

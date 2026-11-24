@@ -103,15 +103,27 @@ pub struct PlanRail {
     on_pick_plan: RefCell<Option<Box<RunCallback>>>,
     on_mode_changed: RefCell<Option<Box<ModeCallback>>>,
     on_width_changed: RefCell<Option<Box<WidthCallback>>>,
-    /// "Subagents" (open rail) and its icon on the strip: at Z0 they zoom
-    /// out to Z1, so the way to the tiles is visible.
+    /// "Subagents" / "Hide subagents" (open rail) and its icon on the
+    /// strip: they show or hide the subagent tiles.
     zoom_button: gtk::Button,
+    zoom_label: gtk::Label,
     strip_zoom: gtk::Button,
     on_zoom: RefCell<Option<Box<dyn Fn()>>>,
 }
 
-pub const ZOOM_BUTTON_HINT: &str =
-    "Show the subagents as live tiles next to this terminal (zoom level 1).\nCtrl+mouse wheel down over the terminal also does this.";
+pub const SHOW_SUBAGENTS_LABEL: &str = "Subagents";
+pub const HIDE_SUBAGENTS_LABEL: &str = "Hide subagents";
+pub const SHOW_SUBAGENTS_HINT: &str = "Show the subagents as live tiles to the right of the plan";
+pub const HIDE_SUBAGENTS_HINT: &str = "Hide the subagent tiles";
+
+/// The label and the tooltip of the subagents button.
+pub fn subagents_button_text(shown: bool) -> (&'static str, &'static str) {
+    if shown {
+        (HIDE_SUBAGENTS_LABEL, HIDE_SUBAGENTS_HINT)
+    } else {
+        (SHOW_SUBAGENTS_LABEL, SHOW_SUBAGENTS_HINT)
+    }
+}
 
 fn node_glyph(status: NodeStatus) -> &'static str {
     match status {
@@ -242,14 +254,15 @@ impl PlanRail {
         let zoom_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         zoom_content.set_halign(gtk::Align::Center);
         zoom_content.append(&gtk::Image::from_icon_name("view-grid-symbolic"));
-        zoom_content.append(&gtk::Label::new(Some("Subagents")));
+        let zoom_label = gtk::Label::new(Some(SHOW_SUBAGENTS_LABEL));
+        zoom_content.append(&zoom_label);
         let zoom_button = gtk::Button::new();
         zoom_button.set_child(Some(&zoom_content));
         zoom_button.add_css_class("limux-plan-rail-zoom");
         zoom_button.set_focus_on_click(false);
         zoom_button.set_margin_start(8);
         zoom_button.set_margin_end(8);
-        zoom_button.set_tooltip_text(Some(ZOOM_BUTTON_HINT));
+        zoom_button.set_tooltip_text(Some(SHOW_SUBAGENTS_HINT));
         zoom_button.set_visible(false);
 
         let list = gtk::ListBox::new();
@@ -284,7 +297,7 @@ impl PlanRail {
         let strip_stats = gtk::Box::new(gtk::Orientation::Vertical, 10);
         strip_stats.set_margin_top(4);
         strip_stats.set_halign(gtk::Align::Center);
-        let strip_zoom = flat_button("view-grid-symbolic", ZOOM_BUTTON_HINT);
+        let strip_zoom = flat_button("view-grid-symbolic", SHOW_SUBAGENTS_HINT);
         strip_zoom.set_halign(gtk::Align::Center);
         strip_zoom.set_visible(false);
         strip.append(&expand);
@@ -322,6 +335,7 @@ impl PlanRail {
             on_mode_changed: RefCell::new(None),
             on_width_changed: RefCell::new(None),
             zoom_button,
+            zoom_label,
             strip_zoom,
             on_zoom: RefCell::new(None),
         });
@@ -489,9 +503,18 @@ impl PlanRail {
         *self.on_zoom.borrow_mut() = Some(Box::new(f));
     }
 
-    /// The "Subagents" button shows only where it leads somewhere: at Z0
-    /// with subagents to show.
-    pub fn set_zoom_button_visible(&self, visible: bool) {
+    /// The subagents button shows when the session has a plan or runs;
+    /// `shown` says whether the tiles show now, so a click hides them.
+    pub fn set_subagents_button(&self, visible: bool, shown: bool) {
+        let (label, hint) = subagents_button_text(shown);
+        self.zoom_label.set_label(label);
+        self.zoom_button.set_tooltip_text(Some(hint));
+        self.strip_zoom.set_tooltip_text(Some(hint));
+        self.strip_zoom.set_icon_name(if shown {
+            "view-restore-symbolic"
+        } else {
+            "view-grid-symbolic"
+        });
         self.zoom_button.set_visible(visible);
         self.strip_zoom.set_visible(visible);
     }
@@ -520,7 +543,7 @@ impl PlanRail {
         self.mode.get() == RailState::Closed && self.has_content.get()
     }
 
-    /// The width the rail takes now, for the zoom geometry.
+    /// The width the rail takes now, for the tile geometry.
     pub fn width(&self) -> f64 {
         if !self.root.is_visible() {
             return 0.0;
@@ -748,6 +771,14 @@ impl PlanRail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_subagents_button_says_what_a_click_does() {
+        assert_eq!(subagents_button_text(false).0, "Subagents");
+        assert!(subagents_button_text(false).1.starts_with("Show"));
+        assert_eq!(subagents_button_text(true).0, "Hide subagents");
+        assert!(subagents_button_text(true).1.starts_with("Hide"));
+    }
 
     fn node(label: &str, status: NodeStatus, children: Vec<PlanNode>) -> PlanNode {
         PlanNode {

@@ -1,9 +1,10 @@
-//! The `zoom_view` object in settings.json: how Ctrl+wheel shows the
-//! subagents of a terminal. Pure data; the GTK side reads it.
+//! The `zoom_view` object in settings.json: how the subagent view shows
+//! the subagents of a terminal. Pure data; the GTK side reads it.
 
 use serde_json::{json, Value};
 
-use super::geometry::{ZoomLevel, MAX_MAIN_SHARE, MIN_MAIN_SHARE};
+use super::dip_state::RunFilter;
+use super::geometry::{MAX_MAIN_SHARE, MIN_MAIN_SHARE};
 
 pub const DEFAULT_MAIN_MIN_COLUMNS: u32 = 120;
 pub const MIN_MAIN_MIN_COLUMNS: u32 = 80;
@@ -107,46 +108,61 @@ impl RailState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZoomViewConfig {
     pub layout: ZoomLayout,
-    /// A zoom step never makes the main terminal narrower than this.
+    /// The subagents never make the terminals narrower than this.
     pub main_min_columns: u32,
     pub plan_rail: RailState,
     /// The width of the open plan rail; dragging its edge saves it here.
     pub plan_rail_width: u32,
-    /// Off: Ctrl+wheel goes to the terminal, as before.
-    pub ctrl_wheel: bool,
     /// Recently finished runs (the /dip pane's rule) stay as dimmed tiles.
     pub show_finished: bool,
-    /// The main terminal's dragged share of the width on Z1, Z2 and Z3,
-    /// in thousandths; 0 keeps the level's default.
-    pub main_share_permille: [u16; 3],
+    /// The terminals' dragged share of the width while the subagents
+    /// show, in thousandths; 0 keeps the default.
+    pub main_share_permille: u16,
+    /// The "Hide done" filter of the subagent pane.
+    pub hide_done: bool,
+    /// The "Hide shells" filter of the subagent pane.
+    pub hide_shells: bool,
 }
 
-/// The JSON keys of `main_share`, one per zoomed level.
-const SHARE_KEYS: [&str; 3] = ["z1", "z2", "z3"];
-
 impl ZoomViewConfig {
-    /// The dragged share of `level`, or None for the default.
-    pub fn main_share(&self, level: ZoomLevel) -> Option<f64> {
-        let index = share_index(level)?;
-        let permille = self.main_share_permille[index];
+    /// The dragged share, or None for the default.
+    pub fn main_share(&self) -> Option<f64> {
+        let permille = self.main_share_permille;
         (permille > 0).then(|| f64::from(permille) / 1000.0)
     }
 
-    /// Keep a dragged share for `level`; None goes back to the default.
-    pub fn set_main_share(&mut self, level: ZoomLevel, share: Option<f64>) {
-        if let Some(index) = share_index(level) {
-            self.main_share_permille[index] = share.map(share_permille).unwrap_or(0);
+    /// The subagent filters that the user chose last.
+    pub fn filter(&self) -> RunFilter {
+        RunFilter {
+            hide_done: self.hide_done,
+            hide_shells: self.hide_shells,
         }
+    }
+
+    pub fn set_filter(&mut self, filter: RunFilter) {
+        self.hide_done = filter.hide_done;
+        self.hide_shells = filter.hide_shells;
+    }
+
+    /// Keep a dragged share; None goes back to the default.
+    pub fn set_main_share(&mut self, share: Option<f64>) {
+        self.main_share_permille = share.map(share_permille).unwrap_or(0);
     }
 }
 
-fn share_index(level: ZoomLevel) -> Option<usize> {
-    match level {
-        ZoomLevel::Z0 => None,
-        ZoomLevel::Z1 => Some(0),
-        ZoomLevel::Z2 => Some(1),
-        ZoomLevel::Z3 => Some(2),
-    }
+/// A share from settings.json. Older builds kept one share per zoom
+/// level (`{"z1": 0.6, ...}`); the Z1 share was the one next to the
+/// subagents, so it stays.
+fn read_share(value: Option<&Value>) -> u16 {
+    let value = match value {
+        Some(Value::Object(levels)) => levels.get("z1"),
+        other => other,
+    };
+    value
+        .and_then(Value::as_f64)
+        .filter(|share| share.is_finite() && *share > 0.0)
+        .map(share_permille)
+        .unwrap_or(0)
 }
 
 fn share_permille(share: f64) -> u16 {
@@ -160,9 +176,10 @@ impl Default for ZoomViewConfig {
             main_min_columns: DEFAULT_MAIN_MIN_COLUMNS,
             plan_rail: RailState::default(),
             plan_rail_width: DEFAULT_RAIL_WIDTH,
-            ctrl_wheel: true,
             show_finished: true,
-            main_share_permille: [0; 3],
+            main_share_permille: 0,
+            hide_done: false,
+            hide_shells: false,
         }
     }
 }
@@ -202,37 +219,27 @@ impl ZoomViewConfig {
                 .and_then(Value::as_u64)
                 .map(|w| w.clamp(u64::from(MIN_RAIL_WIDTH), u64::from(MAX_RAIL_WIDTH)) as u32)
                 .unwrap_or(defaults.plan_rail_width),
-            ctrl_wheel: flag("ctrl_wheel", defaults.ctrl_wheel),
             show_finished: flag("show_finished", defaults.show_finished),
-            main_share_permille: {
-                let shares = obj.get("main_share").and_then(Value::as_object);
-                SHARE_KEYS.map(|key| {
-                    shares
-                        .and_then(|shares| shares.get(key))
-                        .and_then(Value::as_f64)
-                        .filter(|share| share.is_finite() && *share > 0.0)
-                        .map(share_permille)
-                        .unwrap_or(0)
-                })
-            },
+            main_share_permille: read_share(obj.get("main_share")),
+            hide_done: flag("hide_done", defaults.hide_done),
+            hide_shells: flag("hide_shells", defaults.hide_shells),
         }
     }
 
     pub fn to_value(self) -> Value {
-        json!({
+        let mut value = json!({
             "layout": self.layout.as_str(),
             "main_min_columns": self.main_min_columns,
             "plan_rail": self.plan_rail.as_str(),
             "plan_rail_width": self.plan_rail_width,
-            "ctrl_wheel": self.ctrl_wheel,
             "show_finished": self.show_finished,
-            "main_share": SHARE_KEYS
-                .iter()
-                .zip(self.main_share_permille)
-                .filter(|(_, permille)| *permille > 0)
-                .map(|(key, permille)| (key.to_string(), json!(f64::from(permille) / 1000.0)))
-                .collect::<serde_json::Map<_, _>>(),
-        })
+            "hide_done": self.hide_done,
+            "hide_shells": self.hide_shells,
+        });
+        if let Some(share) = self.main_share() {
+            value["main_share"] = json!(share);
+        }
+        value
     }
 }
 
@@ -247,8 +254,25 @@ mod tests {
         assert_eq!(config.main_min_columns, 120);
         assert_eq!(config.plan_rail, RailState::Open);
         assert_eq!(config.plan_rail_width, 240);
-        assert!(config.ctrl_wheel);
         assert!(config.show_finished);
+        assert_eq!(config.main_share(), None);
+        assert_eq!(config.filter(), RunFilter::default());
+    }
+
+    #[test]
+    fn the_filters_are_remembered() {
+        let mut config = ZoomViewConfig::default();
+        config.set_filter(RunFilter {
+            hide_done: true,
+            hide_shells: false,
+        });
+        let value = config.to_value();
+        assert_eq!(value["hide_done"], json!(true));
+        assert_eq!(value["hide_shells"], json!(false));
+        assert_eq!(
+            ZoomViewConfig::from_value(Some(&value)).filter(),
+            config.filter()
+        );
     }
 
     #[test]
@@ -269,9 +293,10 @@ mod tests {
             main_min_columns: 140,
             plan_rail: RailState::Collapsed,
             plan_rail_width: 360,
-            ctrl_wheel: false,
             show_finished: false,
-            main_share_permille: [620, 0, 400],
+            main_share_permille: 620,
+            hide_done: true,
+            hide_shells: true,
         };
         assert_eq!(ZoomViewConfig::from_value(Some(&config.to_value())), config);
     }
@@ -282,27 +307,31 @@ mod tests {
             "layout": "spiral",
             "main_min_columns": 20,
             "plan_rail": "closed",
-            "ctrl_wheel": "yes",
+            "show_finished": "yes",
         });
         let config = ZoomViewConfig::from_value(Some(&value));
         assert_eq!(config.layout, ZoomLayout::Focus);
         assert_eq!(config.main_min_columns, DEFAULT_MAIN_MIN_COLUMNS);
         assert_eq!(config.plan_rail, RailState::Closed);
-        assert!(config.ctrl_wheel);
+        assert!(config.show_finished);
     }
 
     #[test]
-    fn main_shares_are_per_zoomed_level_clamped_and_optional() {
-        let value = json!({ "main_share": { "z1": 0.62, "z2": 2.0, "z3": "wide" } });
-        let mut config = ZoomViewConfig::from_value(Some(&value));
-        assert_eq!(config.main_share(ZoomLevel::Z1), Some(0.62));
-        assert_eq!(config.main_share(ZoomLevel::Z2), Some(MAX_MAIN_SHARE));
-        assert_eq!(config.main_share(ZoomLevel::Z3), None);
-        assert_eq!(config.main_share(ZoomLevel::Z0), None);
-        config.set_main_share(ZoomLevel::Z1, None);
-        config.set_main_share(ZoomLevel::Z0, Some(0.5));
-        assert_eq!(config.main_share(ZoomLevel::Z1), None);
-        assert_eq!(config.to_value()["main_share"], json!({ "z2": 0.9 }));
+    fn the_main_share_is_clamped_optional_and_reads_the_old_z1_share() {
+        let share = |value: Value| {
+            ZoomViewConfig::from_value(Some(&json!({ "main_share": value }))).main_share()
+        };
+        assert_eq!(share(json!(0.62)), Some(0.62));
+        assert_eq!(share(json!(2.0)), Some(MAX_MAIN_SHARE));
+        assert_eq!(share(json!("wide")), None);
+        assert_eq!(share(json!({ "z1": 0.6, "z2": 0.4 })), Some(0.6));
+        assert_eq!(share(json!({ "z2": 0.4 })), None);
+        let mut config = ZoomViewConfig::from_value(Some(&json!({ "main_share": 0.5 })));
+        config.set_main_share(None);
+        assert_eq!(config.main_share(), None);
+        assert!(config.to_value().get("main_share").is_none());
+        config.set_main_share(Some(0.05));
+        assert_eq!(config.to_value()["main_share"], json!(MIN_MAIN_SHARE));
     }
 
     #[test]

@@ -235,7 +235,7 @@ fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInpu
     outer.upcast()
 }
 
-/// The zoom view page: how Ctrl+wheel shows the subagents of a terminal.
+/// The subagent view page: how the subagents of a terminal show.
 fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
     use crate::zoom_view::config::{
         RailState, ZoomLayout, MAX_MAIN_MIN_COLUMNS, MIN_MAIN_MIN_COLUMNS,
@@ -248,7 +248,7 @@ fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
     let group = adw::PreferencesGroup::new();
     group.set_title("Zoom view");
     group.set_description(Some(
-        "Ctrl+wheel down on a terminal shows the subagents of its /dip session as live tiles.",
+        "The plan rail's Subagents button shows the subagents of a /dip session as live tiles.",
     ));
     let current = input.config.borrow().zoom_view;
 
@@ -282,7 +282,7 @@ fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
     columns.set_numeric(true);
     row(
         "Minimum width of the main terminal",
-        "Columns. A zoom step never makes the main terminal narrower than this.",
+        "Columns. The subagent tiles never make the terminals narrower than this.",
         columns.upcast_ref(),
     );
 
@@ -293,14 +293,6 @@ fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
         "Plan rail when a workspace opens",
         "The rail's own close and collapse buttons change it per workspace.",
         rail.upcast_ref(),
-    );
-
-    let wheel = gtk::Switch::new();
-    wheel.set_active(current.ctrl_wheel);
-    row(
-        "Ctrl+wheel zooms the view",
-        "Off: Ctrl+wheel goes to the terminal, as before.",
-        wheel.upcast_ref(),
     );
 
     let finished = gtk::Switch::new();
@@ -338,13 +330,6 @@ fn build_zoom_view_page(input: &SettingsEditorInput) -> gtk::Widget {
         rail.connect_selected_notify(move |dropdown| {
             let value = RailState::from_dropdown_index(dropdown.selected());
             update(Box::new(move |z| z.plan_rail = value));
-        });
-    }
-    {
-        let update = update.clone();
-        wheel.connect_active_notify(move |switch| {
-            let value = switch.is_active();
-            update(Box::new(move |z| z.ctrl_wheel = value));
         });
     }
     finished.connect_active_notify(move |switch| {

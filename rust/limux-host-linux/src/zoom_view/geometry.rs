@@ -1,71 +1,24 @@
-//! Pure layout math for the zoom view. The font never changes: a zoom
-//! step only gives the main terminal fewer columns and the tiles fewer
-//! rows. The GTK side applies the result once per step, so every PTY
+//! Pure layout math for the subagent view. The font never changes: the
+//! tiles only give the terminals fewer columns and themselves fewer
+//! rows. The GTK side applies the result once per change, so every PTY
 //! resizes once, not once per animation frame.
 
 use super::config::ZoomLayout;
 
-/// The zoom levels. Z0 is the normal workspace; Z3 shows the most tiles.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ZoomLevel {
-    #[default]
-    Z0,
-    Z1,
-    Z2,
-    Z3,
-}
-
-impl ZoomLevel {
-    pub fn out(self) -> Self {
-        match self {
-            Self::Z0 => Self::Z1,
-            Self::Z1 => Self::Z2,
-            Self::Z2 | Self::Z3 => Self::Z3,
-        }
-    }
-
-    pub fn r#in(self) -> Self {
-        match self {
-            Self::Z0 | Self::Z1 => Self::Z0,
-            Self::Z2 => Self::Z1,
-            Self::Z3 => Self::Z2,
-        }
-    }
-
-    pub fn is_zoomed(self) -> bool {
-        self != Self::Z0
-    }
-
-    /// The share of the window's columns that the main terminal targets.
-    /// Picked so that a 1920 px window gives 150 / 120 / 120 columns.
-    pub fn main_share(self) -> f64 {
-        match self {
-            Self::Z0 => 1.0,
-            Self::Z1 => 0.565,
-            Self::Z2 => 0.45,
-            Self::Z3 => 0.37,
-        }
-    }
-
-    /// Text rows per tile in the focus layout.
-    fn tile_rows(self) -> u32 {
-        match self {
-            Self::Z0 => 0,
-            Self::Z1 => 14,
-            Self::Z2 => 9,
-            Self::Z3 => 5,
-        }
-    }
-
-    /// The grid columns of tiles that this level asks for.
-    fn tile_grid_columns(self) -> u32 {
-        match self {
-            Self::Z0 => 0,
-            Self::Z1 => 1,
-            Self::Z2 | Self::Z3 => 2,
-        }
-    }
-}
+/// The share of the width that the terminals (the splits) get while the
+/// subagents show. Picked so that a 1920 px window gives about 150
+/// columns.
+pub const DEFAULT_MAIN_SHARE: f64 = 0.565;
+/// A tile is never lower than this many text rows; below it the tile
+/// list scrolls.
+pub const MIN_TILE_ROWS: u32 = 6;
+/// A tile is never higher than this many text rows.
+pub const MAX_TILE_ROWS: u32 = 40;
+/// Another grid column comes only when one column would give the tiles
+/// fewer rows than this.
+pub const COMFORT_TILE_ROWS: u32 = 12;
+/// The focus layout never uses more tile columns than this.
+pub const MAX_GRID_COLUMNS: u32 = 3;
 
 /// The input of one layout pass, all in logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,8 +30,8 @@ pub struct Frame {
     /// The width of the plan rail as it is now (0 when closed or hidden).
     pub rail_width: f64,
     pub main_min_columns: u32,
-    /// The share of the width that the user dragged the main terminal to
-    /// on this level; None keeps the level's default share.
+    /// The share of the width that the user dragged the terminals to;
+    /// None keeps `DEFAULT_MAIN_SHARE`.
     pub main_share: Option<f64>,
 }
 
@@ -110,22 +63,35 @@ fn cols_for(px: f64, cell: f64) -> u32 {
     (px / cell).floor().max(0.0) as u32
 }
 
-/// The focus layout (default): main at the left, full height; the rail;
-/// tiles at the right. A zoom step never makes the main terminal
-/// narrower than `main_min_columns`; at the floor a step takes space
-/// from the tiles. A width dragged with the main handle may go lower.
-pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
-    let available = (frame.width - frame.rail_width).max(0.0);
-    if !level.is_zoomed() {
-        return Placement {
-            main_px: available,
-            main_columns: cols_for(available - TILE_CHROME_WIDTH, frame.cell_width),
-            grid_columns: 0,
-            tile_rows: 0,
-            tile_columns: 0,
-            visible_tiles: 0,
-        };
+/// The text rows of each tile when `per_column` tiles share `height`.
+fn tile_rows_for(height: f64, cell_height: f64, per_column: u32) -> u32 {
+    if per_column == 0 || cell_height <= 0.0 {
+        return MAX_TILE_ROWS;
     }
+    let count = f64::from(per_column);
+    let each = (height - TILE_GAP * count) / count - TILE_CHROME_HEIGHT;
+    ((each / cell_height).floor().max(0.0) as u32).clamp(MIN_TILE_ROWS, MAX_TILE_ROWS)
+}
+
+/// The text columns of each tile when `grid_columns` tiles share
+/// `tile_area` side by side.
+fn tile_columns_for(tile_area: f64, cell_width: f64, grid_columns: u32) -> u32 {
+    let count = grid_columns.max(1);
+    let width = (tile_area - TILE_GAP * f64::from(count - 1)) / f64::from(count);
+    cols_for(width - TILE_CHROME_WIDTH, cell_width)
+}
+
+/// The focus layout (default): the terminals at the left, full height;
+/// the rail; `tiles` subagent tiles at the right. The terminals never get
+/// narrower than `main_min_columns`; at the floor the tiles get less
+/// space. A width dragged with the main handle may go lower.
+///
+/// The tiles fill the height: one tile gets it all, more tiles share it,
+/// down to `MIN_TILE_ROWS` each. When one column would give a tile fewer
+/// than `COMFORT_TILE_ROWS` rows, a second (and third) column comes, as
+/// long as each tile keeps `MIN_TILE_COLUMNS`.
+pub fn focus(frame: Frame, tiles: u32) -> Placement {
+    let available = (frame.width - frame.rail_width).max(0.0);
     // A dragged width is the user's choice: it may go below
     // `main_min_columns`, down to the width of a readable tile.
     let floor_columns = if frame.main_share.is_some() {
@@ -137,29 +103,29 @@ pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
     let target = match frame.main_share {
         // A dragged width leaves room for one readable tile column.
         Some(share) => (frame.width * share).min(available - min_tile_area(frame.cell_width)),
-        None => frame.width * level.main_share(),
+        None => frame.width * DEFAULT_MAIN_SHARE,
     };
     let main_px = target.max(floor_px).min(available);
     let tile_area = (available - main_px).max(0.0);
 
-    let mut grid_columns = level.tile_grid_columns();
-    let tile_columns = loop {
-        let width = (tile_area - TILE_GAP * f64::from(grid_columns.saturating_sub(1)))
-            / f64::from(grid_columns);
-        let cols = cols_for(width - TILE_CHROME_WIDTH, frame.cell_width);
-        if cols >= MIN_TILE_COLUMNS || grid_columns == 1 {
-            break cols;
+    let widest = (1..=MAX_GRID_COLUMNS)
+        .rev()
+        .find(|columns| tile_columns_for(tile_area, frame.cell_width, *columns) >= MIN_TILE_COLUMNS)
+        .unwrap_or(1);
+    let count = tiles.max(1);
+    let mut grid_columns = 1;
+    while grid_columns < widest.min(count) {
+        let per_column = count.div_ceil(grid_columns);
+        if tile_rows_for(frame.height, frame.cell_height, per_column) >= COMFORT_TILE_ROWS {
+            break;
         }
-        grid_columns -= 1;
-    };
-
-    let tile_rows = level.tile_rows();
+        grid_columns += 1;
+    }
+    let per_column = count.div_ceil(grid_columns);
+    let tile_rows = tile_rows_for(frame.height, frame.cell_height, per_column);
+    let tile_columns = tile_columns_for(tile_area, frame.cell_width, grid_columns);
     let tile_height = f64::from(tile_rows) * frame.cell_height + TILE_CHROME_HEIGHT + TILE_GAP;
-    let per_column = if tile_columns == 0 {
-        0
-    } else {
-        (frame.height / tile_height).floor().max(0.0) as u32
-    };
+    let fit = (frame.height / tile_height).floor().max(0.0) as u32;
 
     Placement {
         main_px,
@@ -167,7 +133,7 @@ pub fn focus(frame: Frame, level: ZoomLevel) -> Placement {
         grid_columns,
         tile_rows,
         tile_columns,
-        visible_tiles: per_column * grid_columns,
+        visible_tiles: fit * grid_columns,
     }
 }
 
@@ -191,51 +157,40 @@ pub fn dragged_share(start_px: f64, dx: f64, width: f64) -> f64 {
     ((start_px + dx) / width).clamp(MIN_MAIN_SHARE, MAX_MAIN_SHARE)
 }
 
-/// The strip layout (option D): the main terminal at full width on top,
-/// one row of tiles below it. `main_px` is the height of the main.
-pub fn strip(frame: Frame, level: ZoomLevel) -> Placement {
+/// The share of the height that the strip of tiles takes at most.
+const STRIP_SHARE: f64 = 0.35;
+/// The strip never shows more tiles side by side than this.
+const MAX_STRIP_TILES: u32 = 4;
+
+/// The strip layout (option D): the terminals at full width on top, one
+/// row of tiles below them. `main_px` is the height of the terminals.
+pub fn strip(frame: Frame, tiles: u32) -> Placement {
     let width = (frame.width - frame.rail_width).max(0.0);
     let main_columns = cols_for(width - TILE_CHROME_WIDTH, frame.cell_width);
-    if !level.is_zoomed() {
-        return Placement {
-            main_px: frame.height,
-            main_columns,
-            grid_columns: 0,
-            tile_rows: 0,
-            tile_columns: 0,
-            visible_tiles: 0,
-        };
-    }
-    let tile_rows = level.tile_rows();
+    let tile_rows = tile_rows_for(frame.height * STRIP_SHARE, frame.cell_height, 1);
     let strip_px = f64::from(tile_rows) * frame.cell_height + TILE_CHROME_HEIGHT + TILE_GAP;
     let min_tile_px = f64::from(MIN_TILE_COLUMNS) * frame.cell_width + TILE_CHROME_WIDTH;
-    let count = match level {
-        ZoomLevel::Z1 => 2,
-        ZoomLevel::Z2 => 3,
-        _ => 4,
-    };
     let fit = ((width + TILE_GAP) / (min_tile_px + TILE_GAP))
         .floor()
         .max(1.0) as u32;
-    let grid_columns = count.min(fit);
-    let tile_width = (width - TILE_GAP * f64::from(grid_columns - 1)) / f64::from(grid_columns);
+    let grid_columns = tiles.clamp(1, MAX_STRIP_TILES).min(fit);
     Placement {
         main_px: (frame.height - strip_px).max(0.0),
         main_columns,
         grid_columns,
         tile_rows,
-        tile_columns: cols_for(tile_width - TILE_CHROME_WIDTH, frame.cell_width),
+        tile_columns: tile_columns_for(width, frame.cell_width, grid_columns),
         visible_tiles: grid_columns,
     }
 }
 
 /// The placement for any layout. Grid (B) and tree (C) use the focus
-/// math for the main terminal and differ only in how the GTK side orders
+/// math for the terminals and differ only in how the GTK side orders
 /// and spans the tiles.
-pub fn place(layout: ZoomLayout, frame: Frame, level: ZoomLevel) -> Placement {
+pub fn place(layout: ZoomLayout, frame: Frame, tiles: u32) -> Placement {
     match layout {
-        ZoomLayout::Strip => strip(frame, level),
-        ZoomLayout::Focus | ZoomLayout::Grid | ZoomLayout::Tree => focus(frame, level),
+        ZoomLayout::Strip => strip(frame, tiles),
+        ZoomLayout::Focus | ZoomLayout::Grid | ZoomLayout::Tree => focus(frame, tiles),
     }
 }
 
@@ -269,13 +224,13 @@ mod tests {
 
     #[test]
     fn a_dragged_share_moves_the_main_edge_within_the_floor_and_the_tile_room() {
-        let default = focus(frame(1920.0), ZoomLevel::Z1);
+        let default = focus(frame(1920.0), 1);
         let wider = focus(
             Frame {
                 main_share: Some(0.7),
                 ..frame(1920.0)
             },
-            ZoomLevel::Z1,
+            1,
         );
         assert!((wider.main_px - 1344.0).abs() < 0.01);
         assert!(wider.main_px > default.main_px);
@@ -286,7 +241,7 @@ mod tests {
                 main_share: Some(0.9),
                 ..frame(1920.0)
             },
-            ZoomLevel::Z1,
+            1,
         );
         // The room holds the tile box margins too, so one column more fits.
         assert!((MIN_TILE_COLUMNS..=MIN_TILE_COLUMNS + 2).contains(&widest.tile_columns));
@@ -298,7 +253,7 @@ mod tests {
                 main_share: Some(0.15),
                 ..frame(1920.0)
             },
-            ZoomLevel::Z1,
+            1,
         );
         assert_eq!(narrow.main_columns, MIN_TILE_COLUMNS);
         assert!(narrow.tile_columns > default.tile_columns);
@@ -313,72 +268,65 @@ mod tests {
     }
 
     #[test]
-    fn levels_step_and_clamp() {
-        assert_eq!(ZoomLevel::Z0.out(), ZoomLevel::Z1);
-        assert_eq!(ZoomLevel::Z3.out(), ZoomLevel::Z3);
-        assert_eq!(ZoomLevel::Z1.r#in(), ZoomLevel::Z0);
-        assert_eq!(ZoomLevel::Z0.r#in(), ZoomLevel::Z0);
-    }
-
-    #[test]
-    fn z0_gives_all_space_to_the_main_terminal() {
-        let p = focus(frame(1920.0), ZoomLevel::Z0);
-        assert_eq!(p.main_px, 1680.0);
-        assert_eq!(p.visible_tiles, 0);
-    }
-
-    #[test]
-    fn main_terminal_never_goes_below_the_floor() {
+    fn the_terminals_never_go_below_the_floor() {
         for width in [1440.0, 1920.0, 2560.0, 3840.0] {
-            for level in [ZoomLevel::Z1, ZoomLevel::Z2, ZoomLevel::Z3] {
-                let p = focus(frame(width), level);
-                assert!(
-                    p.main_columns >= 120,
-                    "{width} {level:?}: {}",
-                    p.main_columns
-                );
+            for tiles in [1, 4, 12] {
+                let p = focus(frame(width), tiles);
+                assert!(p.main_columns >= 120, "{width} {tiles}: {}", p.main_columns);
             }
         }
     }
 
     #[test]
-    fn a_1920_window_matches_the_design_table() {
-        let cols = |l| focus(frame(1920.0), l).main_columns;
-        assert!(
-            (148..=152).contains(&cols(ZoomLevel::Z1)),
-            "{}",
-            cols(ZoomLevel::Z1)
-        );
-        assert_eq!(cols(ZoomLevel::Z2), 120);
-        assert_eq!(cols(ZoomLevel::Z3), 120);
+    fn a_1920_window_gives_the_terminals_about_150_columns() {
+        let cols = focus(frame(1920.0), 1).main_columns;
+        assert!((148..=152).contains(&cols), "{cols}");
     }
 
     #[test]
-    fn zooming_out_never_shows_fewer_tiles() {
-        for width in [1440.0, 1920.0, 2560.0] {
-            let z1 = focus(frame(width), ZoomLevel::Z1).visible_tiles;
-            let z2 = focus(frame(width), ZoomLevel::Z2).visible_tiles;
-            let z3 = focus(frame(width), ZoomLevel::Z3).visible_tiles;
-            assert!(z1 <= z2 && z2 <= z3, "{width}: {z1} {z2} {z3}");
-        }
+    fn one_tile_fills_the_height_and_more_tiles_share_it() {
+        let one = focus(frame(1920.0), 1);
+        assert_eq!(one.grid_columns, 1);
+        // 1040 px high, 17 px rows, 36 px of chrome and gap: 59 rows,
+        // capped.
+        assert_eq!(one.tile_rows, MAX_TILE_ROWS);
+        let three = focus(frame(1920.0), 3);
+        assert_eq!(three.grid_columns, 1);
+        assert!(three.tile_rows < one.tile_rows);
+        assert!(three.tile_rows >= COMFORT_TILE_ROWS);
+        assert!(three.visible_tiles >= 3);
     }
 
     #[test]
-    fn narrow_tile_area_falls_back_to_one_grid_column() {
-        let p = focus(frame(1440.0), ZoomLevel::Z3);
-        assert_eq!(p.grid_columns, 1);
-        assert!(p.tile_columns >= MIN_TILE_COLUMNS);
+    fn many_tiles_get_a_second_column_when_it_stays_readable() {
+        let wide = focus(frame(2560.0), 8);
+        assert_eq!(wide.grid_columns, 2);
+        assert!(wide.tile_columns >= MIN_TILE_COLUMNS);
+        // At 1920 px a second column would be too narrow: the tiles get
+        // fewer rows instead, and the list scrolls.
+        let narrow = focus(frame(1920.0), 8);
+        assert_eq!(narrow.grid_columns, 1);
+        assert!(narrow.tile_rows >= MIN_TILE_ROWS);
+    }
+
+    #[test]
+    fn many_tiles_never_go_below_the_minimum_rows() {
+        let p = focus(frame(1920.0), 40);
+        assert_eq!(p.tile_rows, MIN_TILE_ROWS);
+        assert!(p.visible_tiles < 40);
     }
 
     #[test]
     fn strip_keeps_full_width_and_takes_height() {
-        let p = strip(frame(1920.0), ZoomLevel::Z2);
+        let p = strip(frame(1920.0), 3);
         assert_eq!(
             p.main_columns,
-            focus(frame(1920.0), ZoomLevel::Z0).main_columns
+            cols_for(1920.0 - 240.0 - TILE_CHROME_WIDTH, 7.22)
         );
         assert!(p.main_px < 1040.0);
+        assert!(p.main_px > 1040.0 * (1.0 - STRIP_SHARE) - 1.0);
         assert_eq!(p.grid_columns, 3);
+        assert_eq!(strip(frame(1920.0), 9).grid_columns, MAX_STRIP_TILES);
     }
 
     #[test]

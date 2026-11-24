@@ -260,7 +260,7 @@ Common commands:
   read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]
   capture-pane (alias of read-screen)
   zoom-state [--workspace <id|ref>] [--surface <id|ref>]
-      The zoom view and /dip plan rail state of the surface's workspace (JSON).
+      The subagent view and /dip plan rail state of the surface's workspace (JSON).
   tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]
   browser [--surface <id|ref>|<surface>] <subcommand> ...
 
