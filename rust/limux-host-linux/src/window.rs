@@ -1717,7 +1717,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         crate::settings_editor::SETTINGS_CSS,
         crate::settings_editor::ui_scale_css(config),
         ssd_css,
-        workspace_color::workspace_color_css(),
+        workspace_color::workspace_color_css(adw::StyleManager::default().is_dark()),
         sidebar_groups::workspace_group_css(),
     )
 }
@@ -1757,6 +1757,15 @@ pub fn build_window(app: &adw::Application) {
         eprintln!("limux: {warning}");
     }
 
+    // Apply the colour scheme before the CSS loads: the coloured rows have
+    // a light and a dark variant, and `app_css` reads the current one.
+    let style_manager = adw::StyleManager::default();
+    apply_appearance(
+        &style_manager,
+        system_prefers_dark.get(),
+        &config.borrow().appearance,
+    );
+
     // Load CSS
     let provider = gtk::CssProvider::new();
     let all_css = app_css(background_opacity, &config.borrow());
@@ -1772,13 +1781,6 @@ pub fn build_window(app: &adw::Application) {
         &display,
         &swatch_provider,
         gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
-    );
-
-    let style_manager = adw::StyleManager::default();
-    apply_appearance(
-        &style_manager,
-        system_prefers_dark.get(),
-        &config.borrow().appearance,
     );
 
     // Register custom icons — look for icons dir relative to the executable
@@ -2173,6 +2175,11 @@ pub fn build_window(app: &adw::Application) {
                 system_prefers_dark.get(),
                 &state.borrow().config.borrow().appearance,
             );
+            // The coloured rows and the subagent view have a light and a
+            // dark variant of their CSS.
+            let config = state.borrow().config.clone();
+            reload_app_css(&state, &config.borrow());
+            crate::zoom_view::view::sync_color_scheme(style_manager.is_dark());
         });
     }
 

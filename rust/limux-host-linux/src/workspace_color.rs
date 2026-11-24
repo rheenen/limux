@@ -133,7 +133,6 @@ fn darken((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
 /// How far an unselected row's colour is dimmed, at rest and under the pointer.
 const DIM_PERCENT: u16 = 45;
 const DIM_HOVER_PERCENT: u16 = 28;
-const SECONDARY_TEXT_ALPHA: f64 = 1.0;
 
 /// Mix a colour toward white by `percent`, for the selected row's hover state.
 fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
@@ -144,34 +143,90 @@ fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
     (mix(r), mix(g), mix(b))
 }
 
-const SHARED_CSS: &str = r#"
+/// How far an unselected row's colour is mixed toward white in light mode,
+/// at rest and under the pointer. The row is then a tint that carries the
+/// window's dark text; only the selected row shows the full colour.
+const TINT_PERCENT: u16 = 80;
+const TINT_HOVER_PERCENT: u16 = 70;
+
+/// The darkest text Adwaita's light window colour gives on a tint:
+/// `rgb(0 0 6 / 80%)` over the tint. The tests check the contrast with it.
+#[cfg(test)]
+const LIGHT_TEXT_ALPHA: f64 = 0.8;
+
+/// Text and icon colours on the rows that are NOT selected. In dark mode the
+/// dimmed rows are dark and carry white; in light mode the tinted rows are
+/// light and carry the window's own text colour.
+fn unselected_row_text_css(dark: bool) -> String {
+    let (primary, secondary, icon) = if dark {
+        ("alpha(white, 0.88)", "white", "alpha(white, 0.8)")
+    } else {
+        (
+            "alpha(@window_fg_color, 0.88)",
+            "alpha(@window_fg_color, 0.8)",
+            "alpha(@window_fg_color, 0.6)",
+        )
+    };
+    let strong = if dark { "white" } else { "@window_fg_color" };
+    format!(
+        r#"
 /* ---------- Coloured workspace rows ---------- */
+.limux-sidebar-list row .limux-ws-colored .limux-ws-name {{
+    color: {primary};
+}}
+.limux-sidebar-list row .limux-ws-colored .limux-notify-msg-unread,
+.limux-sidebar-list row .limux-ws-colored .limux-notify-dot {{
+    color: {strong};
+}}
+.limux-sidebar-list row .limux-ws-colored .limux-ws-path,
+.limux-sidebar-list row .limux-ws-colored .limux-notify-msg {{
+    color: {secondary};
+}}
+.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn,
+.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn {{
+    color: {icon};
+}}
+.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn:hover,
+.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn-active,
+.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn:hover {{
+    color: {strong};
+}}
+.limux-sidebar-row-unread.limux-ws-colored {{
+    border-left-color: {strong};
+}}
+"#
+    )
+}
+
+/// The selected row shows the full colour in both modes, so it carries white.
+const SELECTED_ROW_CSS: &str = r#"
 .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-ws-colored {
     box-shadow: inset 0 0 0 2px alpha(white, 0.9);
-}
-.limux-sidebar-list row .limux-ws-colored .limux-ws-name {
-    color: alpha(white, 0.88);
 }
 .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-name {
     color: white;
 }
-.limux-sidebar-list row .limux-ws-colored .limux-notify-msg-unread,
-.limux-sidebar-list row .limux-ws-colored .limux-notify-dot {
+.limux-sidebar-list row:selected .limux-ws-colored .limux-notify-msg-unread,
+.limux-sidebar-list row:selected .limux-ws-colored .limux-notify-dot,
+.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-path,
+.limux-sidebar-list row:selected .limux-ws-colored .limux-notify-msg {
     color: white;
 }
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn,
 .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-star-btn,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn {
+.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-close-btn {
     color: alpha(white, 0.8);
 }
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn:hover,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn-active,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn:hover {
+.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-star-btn:hover,
+.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-star-btn-active,
+.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-close-btn:hover {
     color: white;
 }
-.limux-sidebar-row-unread.limux-ws-colored {
+.limux-sidebar-list row:selected .limux-sidebar-row-unread.limux-ws-colored {
     border-left-color: white;
 }
+"#;
+
+const SWATCH_CSS: &str = r#"
 /* The colour sits on a label inside the button: a theme installed as user
    CSS (~/.config/gtk-4.0/gtk.css) out-ranks application CSS for buttons. */
 .limux-ws-color-swatch {
@@ -204,27 +259,39 @@ button.limux-ws-color-swatch-btn {
 }
 "#;
 
-/// CSS for coloured rows and the menu swatches, generated from the palette.
-pub fn workspace_color_css() -> String {
-    let mut css = String::from(SHARED_CSS);
-    css.push_str(&format!(
-        ".limux-sidebar-list row .limux-ws-colored .limux-ws-path,\n\
-         .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-path,\n\
-         .limux-sidebar-list row .limux-ws-colored .limux-notify-msg {{\n\
-             color: alpha(white, {SECONDARY_TEXT_ALPHA});\n\
-         }}\n"
-    ));
+/// The backgrounds of an unselected row, at rest and under the pointer:
+/// dimmed toward black in dark mode, tinted toward white in light mode.
+fn unselected_backgrounds(color: WorkspaceColor, dark: bool) -> [(u8, u8, u8); 2] {
+    if dark {
+        [
+            darken(color.rgb(), DIM_PERCENT),
+            darken(color.rgb(), DIM_HOVER_PERCENT),
+        ]
+    } else {
+        [
+            lighten(color.rgb(), TINT_PERCENT),
+            lighten(color.rgb(), TINT_HOVER_PERCENT),
+        ]
+    }
+}
+
+/// CSS for coloured rows and the menu swatches, generated from the palette
+/// for the dark or the light colour scheme.
+pub fn workspace_color_css(dark: bool) -> String {
+    let mut css = unselected_row_text_css(dark);
+    css.push_str(SELECTED_ROW_CSS);
+    css.push_str(SWATCH_CSS);
     for color in WorkspaceColor::ALL {
         let class = color.css_class();
         let base = hex(color.rgb());
         let hover = hex(lighten(color.rgb(), 12));
-        let dim = hex(darken(color.rgb(), DIM_PERCENT));
-        let dim_hover = hex(darken(color.rgb(), DIM_HOVER_PERCENT));
+        let [rest, rest_hover] = unselected_backgrounds(color, dark).map(hex);
         // The extra class out-ranks the generic hover/selected row backgrounds.
-        // Only the selected row shows the full colour; the others are dimmed.
+        // Only the selected row shows the full colour; the others are dimmed
+        // (dark mode) or tinted (light mode).
         css.push_str(&format!(
-            ".limux-sidebar-list row .limux-sidebar-row-box.{class} {{\n    background: {dim};\n}}\n\
-             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class} {{\n    background: {dim_hover};\n}}\n\
+            ".limux-sidebar-list row .limux-sidebar-row-box.{class} {{\n    background: {rest};\n}}\n\
+             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class} {{\n    background: {rest_hover};\n}}\n\
              .limux-sidebar-list row:selected .limux-sidebar-row-box.{class},\n\
              .{SWATCH_CSS_CLASS}.{class} {{\n    background: {base};\n}}\n\
              .limux-sidebar-list row:selected:hover .limux-sidebar-row-box.{class},\n\
@@ -295,27 +362,32 @@ mod tests {
         }
     }
 
+    fn contrast((fr, fg, fb): (u8, u8, u8), background: (u8, u8, u8)) -> f64 {
+        let (light, dark) = {
+            let a = relative_luminance((fr, fg, fb));
+            let b = relative_luminance(background);
+            (a.max(b), a.min(b))
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    /// Text drawn at `alpha` over `background`.
+    fn composite(text: (u8, u8, u8), alpha: f64, background: (u8, u8, u8)) -> (u8, u8, u8) {
+        let mix =
+            |fg: u8, bg: u8| (f64::from(fg) * alpha + f64::from(bg) * (1.0 - alpha)).round() as u8;
+        (
+            mix(text.0, background.0),
+            mix(text.1, background.1),
+            mix(text.2, background.2),
+        )
+    }
+
     #[test]
-    fn secondary_text_is_readable_in_every_row_state() {
+    fn secondary_text_is_readable_in_every_dark_row_state() {
         for color in WorkspaceColor::ALL {
-            for background in [
-                darken(color.rgb(), DIM_PERCENT),
-                darken(color.rgb(), DIM_HOVER_PERCENT),
-                color.rgb(),
-                lighten(color.rgb(), 12),
-            ] {
-                let composite = |channel: u8| {
-                    (255.0 * SECONDARY_TEXT_ALPHA
-                        + f64::from(channel) * (1.0 - SECONDARY_TEXT_ALPHA))
-                        .round() as u8
-                };
-                let foreground = (
-                    composite(background.0),
-                    composite(background.1),
-                    composite(background.2),
-                );
-                let contrast = (relative_luminance(foreground) + 0.05)
-                    / (relative_luminance(background) + 0.05);
+            let [rest, rest_hover] = unselected_backgrounds(color, true);
+            for background in [rest, rest_hover, color.rgb(), lighten(color.rgb(), 12)] {
+                let contrast = contrast((255, 255, 255), background);
                 assert!(
                     contrast >= 4.5,
                     "{} on {} has secondary-text contrast {contrast:.2}",
@@ -327,25 +399,62 @@ mod tests {
     }
 
     #[test]
-    fn css_paints_every_color_for_rows_and_swatches() {
-        let css = workspace_color_css();
+    fn light_tints_carry_the_window_text() {
+        // Adwaita's light window text is rgb(0 0 6 / 80%); the secondary
+        // text draws it at 80% of that again.
         for color in WorkspaceColor::ALL {
-            let class = color.css_class();
-            assert!(css.contains(&format!(".limux-sidebar-row-box.{class}")));
-            assert!(css.contains(&format!("\n.{SWATCH_CSS_CLASS}.{class} {{")));
-            // Themes loaded as user CSS restyle buttons, so no swatch colour
-            // may depend on a button background.
-            assert!(!css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
-            assert!(css.contains(&hex(color.rgb())));
-            // Unselected rows are dimmed, so they stay darker than the selected one.
-            let dim = darken(color.rgb(), DIM_PERCENT);
-            assert!(css.contains(&hex(dim)));
-            assert!(relative_luminance(dim) < relative_luminance(color.rgb()));
+            for background in unselected_backgrounds(color, false) {
+                for alpha in [LIGHT_TEXT_ALPHA, LIGHT_TEXT_ALPHA * 0.8] {
+                    let text = composite((0, 0, 6), alpha, background);
+                    let contrast = contrast(text, background);
+                    assert!(
+                        contrast >= 4.5,
+                        "{} tint {} has text contrast {contrast:.2}",
+                        color.as_str(),
+                        hex(background),
+                    );
+                }
+                // A tint stays lighter than the selected row, so the full
+                // colour still marks the selection.
+                assert!(relative_luminance(background) > relative_luminance(color.rgb()));
+            }
         }
-        assert!(css.contains(COLORED_ROW_CSS_CLASS));
-        assert!(css.contains(&format!(
-            "\n.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
-        )));
+    }
+
+    #[test]
+    fn css_paints_every_color_for_rows_and_swatches() {
+        for dark in [true, false] {
+            let css = workspace_color_css(dark);
+            for color in WorkspaceColor::ALL {
+                let class = color.css_class();
+                assert!(css.contains(&format!(".limux-sidebar-row-box.{class}")));
+                assert!(css.contains(&format!("\n.{SWATCH_CSS_CLASS}.{class} {{")));
+                // Themes loaded as user CSS restyle buttons, so no swatch colour
+                // may depend on a button background.
+                assert!(!css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
+                assert!(css.contains(&hex(color.rgb())));
+                for background in unselected_backgrounds(color, dark) {
+                    assert!(css.contains(&hex(background)));
+                }
+            }
+            assert!(css.contains(COLORED_ROW_CSS_CLASS));
+            assert!(css.contains(&format!(
+                "\n.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
+            )));
+        }
+        // Unselected rows are dimmed in dark mode, so they stay darker than
+        // the selected one.
+        for color in WorkspaceColor::ALL {
+            let [rest, _] = unselected_backgrounds(color, true);
+            assert!(relative_luminance(rest) < relative_luminance(color.rgb()));
+        }
         assert!(SWATCH_BUTTON_CSS.contains(&format!("button.{SWATCH_BUTTON_CSS_CLASS} {{")));
+    }
+
+    #[test]
+    fn unselected_text_follows_the_color_scheme() {
+        let name_rule = ".limux-sidebar-list row .limux-ws-colored .limux-ws-name {\n    color: ";
+        assert!(workspace_color_css(true).contains(&format!("{name_rule}alpha(white")));
+        assert!(workspace_color_css(false).contains(&format!("{name_rule}alpha(@window_fg_color")));
     }
 }

@@ -225,52 +225,123 @@ fn filter_button(label: &str, icon: &str, active: bool) -> gtk::ToggleButton {
     button
 }
 
+thread_local! {
+    static PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+}
+
 fn install_css() {
-    thread_local! {
-        static INSTALLED: Cell<bool> = const { Cell::new(false) };
-    }
-    if INSTALLED.with(|done| done.replace(true)) {
+    if PROVIDER.with(|provider| provider.borrow().is_some()) {
         return;
     }
     let Some(display) = gtk::gdk::Display::default() else {
         return;
     };
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(VIEW_CSS);
+    provider.load_from_data(&view_css(libadwaita::StyleManager::default().is_dark()));
     gtk::style_context_add_provider_for_display(&display, &provider, super::CSS_PRIORITY);
+    PROVIDER.with(|slot| *slot.borrow_mut() = Some(provider));
 }
+
+/// Load the view's CSS for the dark or the light colour scheme. The window
+/// calls this when the scheme changes; before the first view exists it does
+/// nothing, and `install_css` reads the scheme itself.
+pub(crate) fn sync_color_scheme(dark: bool) {
+    PROVIDER.with(|provider| {
+        if let Some(provider) = provider.borrow().as_ref() {
+            provider.load_from_data(&view_css(dark));
+        }
+    });
+}
+
+/// The colours of the view that do not come from the theme. The dark
+/// values are light so they read on a dark window; the light values are
+/// dark so they read on a light window.
+struct ViewPalette {
+    /// Behind the rail and the tiles. The window's content area is dark in
+    /// both schemes (it matches the terminal), so the light scheme paints
+    /// these panels with the window colour.
+    panel: &'static str,
+    handle: &'static str,
+    focus: &'static str,
+    selected: &'static str,
+    running: &'static str,
+    done: &'static str,
+    failed: &'static str,
+    limit: &'static str,
+    taken_over: &'static str,
+}
+
+const DARK_PALETTE: ViewPalette = ViewPalette {
+    panel: "transparent",
+    handle: "#c8c8c8",
+    focus: "#6aa6ff",
+    selected: "#f0b45e",
+    running: "#e5c07b",
+    done: "#6fcf8f",
+    failed: "#ff8a8a",
+    limit: "#d68ae6",
+    taken_over: "#56c8d8",
+};
+
+const LIGHT_PALETTE: ViewPalette = ViewPalette {
+    panel: "@window_bg_color",
+    handle: "#8c8c8c",
+    focus: "#1f6feb",
+    selected: "#c87f0a",
+    running: "#8a5a00",
+    done: "#1a7f37",
+    failed: "#c62828",
+    limit: "#8e3fb0",
+    taken_over: "#0b6e7a",
+};
 
 /// The CSS of the view. Every pane is a card with rounded corners; the
 /// pane with the keyboard focus has a blue edge. The drag handles show a
-/// light gray line, so the edge between the rail and the tiles is
-/// visible.
-const VIEW_CSS: &str = "\
-         .limux-plan-strip { border-left: 1px solid alpha(currentColor, 0.12); border-right: 1px solid alpha(currentColor, 0.12); }\n\
-         .limux-plan-rail-handle, .limux-zoom-main-handle { background: linear-gradient(to right, transparent 2px, #c8c8c8 2px, #c8c8c8 4px, transparent 4px); }\n\
-         .limux-plan-rail-handle:hover, .limux-zoom-main-handle:hover { background: alpha(#c8c8c8, 0.6); }\n\
-         .limux-plan-strip-count { font-weight: bold; font-size: 0.9em; }\n\
-         .limux-zoom-tile, .limux-pane-card { border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }\n\
-         .limux-pane-card { margin: 3px; }\n\
-         .limux-pane-card:focus-within { border-color: alpha(#6aa6ff, 0.55); }\n\
-         .limux-zoom-pane-header { margin-bottom: 2px; }\n\
-         .limux-zoom-filter { padding: 0 8px; min-height: 24px; font-size: 0.85em; }\n\
-         .limux-zoom-filter:checked { background: alpha(#6aa6ff, 0.3); color: @window_fg_color; }\n\
-         .limux-zoom-pane-close { min-height: 0; min-width: 0; padding: 2px; }\n\
-         .limux-zoom-tile-done { opacity: 0.6; }\n\
-         .limux-zoom-tile-selected { border: 2px solid #f0b45e; }\n\
-         .limux-zoom-card-title { padding: 0 10px; font-size: 0.9em; background: alpha(currentColor, 0.05); border-bottom: 1px solid alpha(currentColor, 0.1); }\n\
-         .limux-zoom-card-glyph { font-weight: bold; }\n\
-         .limux-zoom-card-name { font-weight: 600; }\n\
-         .limux-zoom-card-end { font-family: monospace; }\n\
-         .limux-plan-rail-summary { font-size: 0.85em; }\n\
-         .limux-plan-rail-list > row { min-height: 0; padding-top: 1px; padding-bottom: 1px; margin-top: 0; margin-bottom: 0; }\n\
-         .limux-zoom-st-running { color: #e5c07b; }\n\
-         .limux-zoom-st-done { color: #6fcf8f; }\n\
-         .limux-zoom-st-failed { color: #ff8a8a; }\n\
-         .limux-zoom-st-limit { color: #d68ae6; }\n\
-         .limux-zoom-st-stopped { color: alpha(currentColor, 0.55); }\n\
-         .limux-zoom-st-taken-over { color: #56c8d8; }\n\
-         .limux-zoom-indicator { padding: 4px; font-size: 0.9em; }\n";
+/// gray line, so the edge between the rail and the tiles is visible.
+fn view_css(dark: bool) -> String {
+    let ViewPalette {
+        panel,
+        handle,
+        focus,
+        selected,
+        running,
+        done,
+        failed,
+        limit,
+        taken_over,
+    } = if dark { DARK_PALETTE } else { LIGHT_PALETTE };
+    format!(
+        "\
+         .limux-plan-rail, .limux-plan-strip, .limux-zoom-tiles {{ background-color: {panel}; }}\n\
+         .limux-zoom-tiles {{ padding: 4px 6px 0 6px; }}\n\
+         .limux-plan-strip {{ border-left: 1px solid alpha(currentColor, 0.12); border-right: 1px solid alpha(currentColor, 0.12); }}\n\
+         .limux-plan-rail-handle, .limux-zoom-main-handle {{ background: linear-gradient(to right, transparent 2px, {handle} 2px, {handle} 4px, transparent 4px); }}\n\
+         .limux-plan-rail-handle:hover, .limux-zoom-main-handle:hover {{ background: alpha({handle}, 0.6); }}\n\
+         .limux-plan-strip-count {{ font-weight: bold; font-size: 0.9em; }}\n\
+         .limux-zoom-tile, .limux-pane-card {{ border: 1px solid alpha(currentColor, 0.15); border-radius: 10px; }}\n\
+         .limux-pane-card {{ margin: 3px; }}\n\
+         .limux-pane-card:focus-within {{ border-color: alpha({focus}, 0.55); }}\n\
+         .limux-zoom-pane-header {{ margin-bottom: 2px; }}\n\
+         .limux-zoom-filter {{ padding: 0 8px; min-height: 24px; font-size: 0.85em; }}\n\
+         .limux-zoom-filter:checked {{ background: alpha({focus}, 0.3); color: @window_fg_color; }}\n\
+         .limux-zoom-pane-close {{ min-height: 0; min-width: 0; padding: 2px; }}\n\
+         .limux-zoom-tile-done {{ opacity: 0.6; }}\n\
+         .limux-zoom-tile-selected {{ border: 2px solid {selected}; }}\n\
+         .limux-zoom-card-title {{ padding: 0 10px; font-size: 0.9em; background: alpha(currentColor, 0.05); border-bottom: 1px solid alpha(currentColor, 0.1); }}\n\
+         .limux-zoom-card-glyph {{ font-weight: bold; }}\n\
+         .limux-zoom-card-name {{ font-weight: 600; }}\n\
+         .limux-zoom-card-end {{ font-family: monospace; }}\n\
+         .limux-plan-rail-summary {{ font-size: 0.85em; }}\n\
+         .limux-plan-rail-list > row {{ min-height: 0; padding-top: 1px; padding-bottom: 1px; margin-top: 0; margin-bottom: 0; }}\n\
+         .limux-zoom-st-running {{ color: {running}; }}\n\
+         .limux-zoom-st-done {{ color: {done}; }}\n\
+         .limux-zoom-st-failed {{ color: {failed}; }}\n\
+         .limux-zoom-st-limit {{ color: {limit}; }}\n\
+         .limux-zoom-st-stopped {{ color: alpha(currentColor, 0.55); }}\n\
+         .limux-zoom-st-taken-over {{ color: {taken_over}; }}\n\
+         .limux-zoom-indicator {{ padding: 4px; font-size: 0.9em; }}\n"
+    )
+}
 
 impl ZoomView {
     pub fn new(container: &Rc<SplitTreeContainer>, config: Rc<RefCell<AppConfig>>) -> Rc<Self> {
@@ -297,9 +368,8 @@ impl ZoomView {
         let tiles_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
         tiles_box.set_hexpand(true);
         tiles_box.set_vexpand(true);
-        tiles_box.set_margin_start(6);
-        tiles_box.set_margin_end(6);
-        tiles_box.set_margin_top(4);
+        // Padding, not margins: the light scheme paints the box (see `view_css`).
+        tiles_box.add_css_class("limux-zoom-tiles");
         let tiles_header = gtk::Label::new(None);
         tiles_header.set_xalign(0.0);
         tiles_header.set_hexpand(true);
@@ -1379,5 +1449,67 @@ impl ZoomView {
 impl Drop for ZoomView {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod css_tests {
+    use super::*;
+
+    fn luminance(hex: &str) -> f64 {
+        let channel = |i: usize| {
+            let value = f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap()) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+    }
+
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    fn status_colors(palette: &ViewPalette) -> [&'static str; 5] {
+        [
+            palette.running,
+            palette.done,
+            palette.failed,
+            palette.limit,
+            palette.taken_over,
+        ]
+    }
+
+    #[test]
+    fn status_text_reads_on_its_window() {
+        // Adwaita's window backgrounds: #222226 (dark) and #fafafb (light).
+        for color in status_colors(&DARK_PALETTE) {
+            assert!(contrast(color, "#222226") >= 4.5, "{color} on dark");
+        }
+        for color in status_colors(&LIGHT_PALETTE) {
+            assert!(contrast(color, "#fafafb") >= 4.5, "{color} on light");
+        }
+    }
+
+    #[test]
+    fn both_schemes_style_every_status() {
+        for dark in [true, false] {
+            let css = view_css(dark);
+            for status in [
+                RunStatus::Running,
+                RunStatus::Done,
+                RunStatus::Failed,
+                RunStatus::Limit,
+                RunStatus::Stopped,
+                RunStatus::TakenOver,
+            ] {
+                assert!(css.contains(&format!(".{} {{", status_css(status))));
+            }
+        }
+        assert!(view_css(false).contains(LIGHT_PALETTE.running));
+        assert!(!view_css(false).contains(DARK_PALETTE.running));
     }
 }

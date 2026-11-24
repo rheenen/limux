@@ -44,13 +44,13 @@ pub(super) fn workspace_group_css() -> String {
     padding: 4px 8px;
     margin: 4px 6px 0 6px;
     border-radius: 8px;
-    background: #2e2e2e;
+    background: alpha(@window_fg_color, 0.08);
 }
 .limux-sidebar-list row:hover .limux-ws-group-header {
-    background: #383838;
+    background: alpha(@window_fg_color, 0.12);
 }
 .limux-ws-group-chevron {
-    color: alpha(white, 0.7);
+    color: alpha(@window_fg_color, 0.7);
     font-size: 15px;
     min-width: 20px;
 }
@@ -64,7 +64,7 @@ pub(super) fn workspace_group_css() -> String {
     font-weight: 600;
 }
 .limux-ws-group-count {
-    color: alpha(white, 0.6);
+    color: alpha(@window_fg_color, 0.6);
     font-size: 11px;
     margin-left: 6px;
 }
@@ -1009,6 +1009,22 @@ mod tests {
             assert!(css.contains(&format!("row.{MEMBER_CSS_CLASS}.{class} {{")));
             assert!(css.contains(&color.css_hex()));
         }
+    }
+
+    #[test]
+    fn group_header_follows_the_color_scheme() {
+        // The header sits on the sidebar, so it takes the window colours and
+        // reads in light mode as well as in dark mode. Only the coloured pill
+        // carries white text.
+        let css = workspace_group_css();
+        let header = css
+            .split("/* ---------- Workspace groups ---------- */")
+            .nth(1)
+            .and_then(|rest| rest.split(".limux-ws-group-pill {").next())
+            .unwrap();
+        assert!(header.contains("@window_fg_color"));
+        assert!(!header.contains('#'));
+        assert!(!header.contains("white"));
     }
 
     #[test]
